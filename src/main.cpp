@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <IniFile.h>
 #include <M1820.h>
 #include <SPI.h>
 
@@ -31,13 +32,36 @@
 #define LED_REC_ON SETSTATE(LED_ON, REC)
 #define LED_REC_OFF SETSTATE(LED_OFF, REC)
 
+//////
+uint8_t FSD_ADDR;
+uint32_t FSD_BAUD;
+uint32_t FSD_POLLINGINTERVAL;
+
+uint8_t IRDA_ADDR;
+uint32_t IRDA_BAUD;
+bool IRDA_ALLOWCTRL;
+
+String ESPNOW_KEY;
+bool ESPNOW_ALLOWCTRL;
+
+uint8_t START_TRIGGER,
+    STOP_TRIGGER;
+uint32_t SAMPLE_INTERVAL = 1000; // ms, 采样周期
+
+uint8_t CRITICAL_TEMP;
+uint8_t MAX_TEMP;
+byte ONBOARD_SENSOR_ID[8];
+//////
+
 M1820 TempSensors[9]; // 1 internal sensors and 8 external sensors
 OneWire oneWire;      // OneWire bus
 int SensorCount = 0;
 uint8_t LED_STATE = 0;
 uint64_t LASTSAMPLE = 0;
+TaskHandle_t TASK_LEDControl = NULL;
+TaskHandle_t TASK_Sample = NULL;
 
-uint16_t SAMPLE_INTERVAL = 5000; // ms, 采样周期
+static portMUX_TYPE mux_ledcontrol = portMUX_INITIALIZER_UNLOCKED;
 
 void LEDControl(void *);
 void Sample(void *param);
@@ -48,14 +72,14 @@ void setup()
   pinMode(LED_SAP, OUTPUT);
   pinMode(LED_REC, OUTPUT);
 
-  TaskHandle_t TASK_HandleOne = NULL;
   xTaskCreate(
-      LEDControl,       /* 任务函数 */
-      "LEDControl",     /* 任务名 */
-      2 * 1024,         /* 任务栈大小，根据需要自行设置*/
-      NULL,             /* 参数，入参为空 */
-      1,                /* 优先级 */
-      &TASK_HandleOne); /* 任务句柄 */
+      LEDControl,        /* 任务函数 */
+      "LEDControl",      /* 任务名 */
+      2 * 1024,          /* 任务栈大小，根据需要自行设置*/
+      NULL,              /* 参数，入参为空 */
+      1,                 /* 优先级 */
+      &TASK_LEDControl); /* 任务句柄 */
+
   LED_ERR_ON;
   LED_SAP_ON;
   LED_REC_ON;
@@ -67,8 +91,59 @@ void setup()
   DEBUG.print(__DATE__);
   DEBUG.print(" ");
   DEBUG.print(__TIME__);
-  DEBUG.print("\n");
-  DEBUG.println("Copyright Developer_ken");
+  DEBUG.println();
+  DEBUG.println("===================================");
+
+  DEBUG.println("Mounting SD card...");
+  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+  if (SD.begin(SD_CS, SPI, 24000000))
+  {
+    DEBUG.println("SD card mounted:");
+    DEBUG.printf("- Type: %d\n", (int)SD.cardType());
+    DEBUG.printf("- Size: %lu\n", SD.cardSize() / 1024);
+    DEBUG.printf("- Used: %lu\n", SD.usedBytes() / 1024);
+  }
+  else
+  {
+    DEBUG.println("SD card mount failed.");
+    LED_ERR_ON;
+    LED_SAP_ON;
+    SETSTATE(LED_BLINK, REC);
+    while (1)
+      delay(1000);
+  }
+
+  auto testf = SD.open("/test1.txt", FILE_APPEND, true);
+  testf.println("Hey, Hello World!");
+  testf.close();
+  // DEBUG.println("Loading config file...");
+  // {
+  //   IniFile confFile("/config.ini");
+  //   if (!confFile.open())
+  //   {
+  //     DEBUG.println("/config.ini does not exists.");
+  //     LED_ERR_ON;
+  //     SETSTATE(LED_BLINK, SAP);
+  //     LED_REC_OFF;
+  //     while (1)
+  //       delay(1000);
+  //   }
+
+  //   {
+  //     char inibuffer[128];
+  //     if (!confFile.validate(inibuffer, 128))
+  //     {
+  //       inibuffer[127] = '\0';
+  //       DEBUG.println("Config file invalid:");
+  //       DEBUG.println(inibuffer);
+  //       LED_ERR_ON;
+  //       SETSTATE(LED_BLINK, SAP);
+  //       LED_REC_OFF;
+  //       while (1)
+  //         delay(1000);
+  //     }
+  //   }
+  // }
 
   DEBUG.println("Init RS485 and IRDA phy...");
   RS485.setPins(RS485_RX, RS485_TX);
@@ -103,34 +178,17 @@ void setup()
   }
   DEBUG.printf("Scan complete. %d sensors found.\n", SensorCount);
 
-  DEBUG.println("Mounting SD card...");
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-  if (SD.begin(SD_CS, SPI, 8000000))
-  { // 8MHz
-    DEBUG.println("SD card mounted:");
-    DEBUG.printf("- Type: %d\n", (int)SD.cardType());
-    DEBUG.printf("- Size: %lu\n", SD.cardSize() / 1024);
-    // DEBUG.printf("- Used: %lu\n", SD.usedBytes() / 1024);
-  }
-  else
-  {
-    DEBUG.println("SD card mount failed.");
-    LED_ERR_ON;
-    LED_REC_OFF;
-    SETSTATE(LED_BLINK, SAP);
-    while (1)
-      delay(1000);
-  }
   LED_ERR_OFF;
   LED_REC_OFF;
   SETSTATE(LED_CYCLE, SAP);
+
   xTaskCreate(
-      Sample,           /* 任务函数 */
-      "Sample",         /* 任务名 */
-      2 * 1024,         /* 任务栈大小，根据需要自行设置*/
-      NULL,             /* 参数，入参为空 */
-      1,                /* 优先级 */
-      &TASK_HandleOne); /* 任务句柄 */
+      Sample,        /* 任务函数 */
+      "Sample",      /* 任务名 */
+      2 * 1024,      /* 任务栈大小，根据需要自行设置*/
+      NULL,          /* 参数，入参为空 */
+      10,            /* 优先级 */
+      &TASK_Sample); /* 任务句柄 */
 }
 
 void loop()
@@ -156,6 +214,7 @@ void LEDControl(void *param)
   bool direction = true;
   while (true)
   {
+    taskENTER_CRITICAL(&mux_ledcontrol);
     _applyLEDState(LED_ERR, (LED_STATE & (0b11 << ERR)) >> ERR, bState);
     _applyLEDState(LED_SAP, (LED_STATE & (0b11 << SAP)) >> SAP, bState);
     _applyLEDState(LED_REC, (LED_STATE & (0b11 << REC)) >> REC, bState);
@@ -177,6 +236,7 @@ void LEDControl(void *param)
     {
       bState -= 8;
     }
+    taskEXIT_CRITICAL(&mux_ledcontrol);
     delay(100);
   }
 }
@@ -186,18 +246,28 @@ void Sample(void *param)
   TickType_t xLastWakeTime = xTaskGetTickCount();
   TickType_t xLastflashTime;
   const TickType_t taskPeriod = SAMPLE_INTERVAL;
+
+  taskENTER_CRITICAL(&mux_ledcontrol);
   LED_SAP_OFF;
+  taskEXIT_CRITICAL(&mux_ledcontrol);
   while (true)
   {
     vTaskDelayUntil(&xLastWakeTime, taskPeriod);
     xLastflashTime = xTaskGetTickCount();
+
+    taskENTER_CRITICAL(&mux_ledcontrol);
     LED_SAP_ON;
+    taskEXIT_CRITICAL(&mux_ledcontrol);
     { // 在这里采样和保存
       M1820::SampleNow();
       float temp = TempSensors[0].receiveTemperature();
-      DEBUG.printf("Time:%d Temp: %.2f\n", xLastWakeTime, temp);
+      DEBUG.printf("Time:%d Temp: %.2f\n", xTaskGetTickCount(), temp);
     }
-    vTaskDelayUntil(&xLastflashTime, 250);
+    vTaskDelayUntil(&xLastflashTime, 150);
+
+    taskENTER_CRITICAL(&mux_ledcontrol);
     LED_SAP_OFF;
+    taskEXIT_CRITICAL(&mux_ledcontrol);
+    delay(1000);
   }
 }
