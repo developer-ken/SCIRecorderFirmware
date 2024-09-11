@@ -68,7 +68,6 @@ void setup()
   DEBUG.print(" ");
   DEBUG.print(__TIME__);
   DEBUG.print("\n");
-  DEBUG.println("Copyright Developer_ken");
 
   DEBUG.println("Init RS485 and IRDA phy...");
   RS485.setPins(RS485_RX, RS485_TX);
