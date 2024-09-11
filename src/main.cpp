@@ -1,13 +1,12 @@
 #include <Arduino.h>
+#include <IniFile.h>
 #include <M1820.h>
 #include <SPI.h>
+#include <SdFat.h>
+#include <sdios.h>
 
 #include "irda.h"
 #include "pinout.h"
-
-#include "FS.h"
-#include "SD.h"
-#include "SD_MMC.h"
 
 #define DEBUG Serial
 #define RS485 Serial1
@@ -31,22 +30,52 @@
 #define LED_REC_ON SETSTATE(LED_ON, REC)
 #define LED_REC_OFF SETSTATE(LED_OFF, REC)
 
+//////
+uint8_t FSD_ADDR;
+uint32_t FSD_BAUD;
+uint32_t FSD_POLLINGINTERVAL;
+
+uint8_t IRDA_ADDR;
+uint32_t IRDA_BAUD;
+bool IRDA_ALLOWCTRL;
+
+String ESPNOW_KEY;
+bool ESPNOW_ALLOWCTRL;
+
+uint8_t START_TRIGGER,
+    STOP_TRIGGER;
+uint32_t SAMPLE_INTERVAL = 5000; // ms, 采样周期
+
+uint8_t CRITICAL_TEMP;
+uint8_t MAX_TEMP;
+byte ONBOARD_SENSOR_ID[8];
+//////
+
 M1820 TempSensors[9]; // 1 internal sensors and 8 external sensors
 OneWire oneWire;      // OneWire bus
+SdFat sd;
 int SensorCount = 0;
 uint8_t LED_STATE = 0;
 uint64_t LASTSAMPLE = 0;
 
-uint16_t SAMPLE_INTERVAL = 5000; // ms, 采样周期
-
 void LEDControl(void *);
 void Sample(void *param);
+void LoadConfig();
+
+SdSpiConfig SDCONF(SD_CS, DEDICATED_SPI, SD_SCK_MHZ(8), &SPI);
+
+void errorPrint() {
+  if (sd.sdErrorCode()) {
+    printSdErrorSymbol(&DEBUG, sd.sdErrorCode());
+  }
+}
 
 void setup()
 {
   pinMode(LED_ERR, OUTPUT);
   pinMode(LED_SAP, OUTPUT);
   pinMode(LED_REC, OUTPUT);
+  pinMode(SD_CS  , OUTPUT);
 
   TaskHandle_t TASK_HandleOne = NULL;
   xTaskCreate(
@@ -68,6 +97,53 @@ void setup()
   DEBUG.print(" ");
   DEBUG.print(__TIME__);
   DEBUG.print("\n");
+
+  DEBUG.println("Mounting SD card...");
+  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+  if (!sd.cardBegin(SDCONF))
+  {
+    DEBUG.println("SD card mounted:");
+    DEBUG.printf("- Type: %d\n", (int)sd.card()->type());
+    DEBUG.printf("- Size: %lu\n", sd.card()->sectorCount() / 2);
+  }
+  else
+  {
+    DEBUG.println("SD card mount failed.");
+    errorPrint();
+    LED_ERR_ON;
+    LED_SAP_ON;
+    SETSTATE(LED_BLINK, REC);
+    while (1)
+      delay(1000);
+  }
+
+  // DEBUG.println("Loading config...");
+  // const char *ccharx = "/config.ini";
+  // IniFile confFile(ccharx);
+  // if (!confFile.open())
+  // {
+  //   DEBUG.println("/config.ini does not exists.");
+  //   LED_ERR_ON;
+  //   SETSTATE(LED_BLINK, SAP);
+  //   LED_REC_OFF;
+  //   while (1)
+  //     delay(1000);
+  // }
+
+  // {
+  //   char inibuffer[128];
+  //   if (!confFile.validate(inibuffer, 128))
+  //   {
+  //     inibuffer[127] = '\0';
+  //     DEBUG.println("Config file invalid:");
+  //     DEBUG.println(inibuffer);
+  //     LED_ERR_ON;
+  //     SETSTATE(LED_BLINK, SAP);
+  //     LED_REC_OFF;
+  //     while (1)
+  //       delay(1000);
+  //   }
+  // }
 
   DEBUG.println("Init RS485 and IRDA phy...");
   RS485.setPins(RS485_RX, RS485_TX);
@@ -102,24 +178,6 @@ void setup()
   }
   DEBUG.printf("Scan complete. %d sensors found.\n", SensorCount);
 
-  DEBUG.println("Mounting SD card...");
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-  if (SD.begin(SD_CS, SPI, 8000000))
-  { // 8MHz
-    DEBUG.println("SD card mounted:");
-    DEBUG.printf("- Type: %d\n", (int)SD.cardType());
-    DEBUG.printf("- Size: %lu\n", SD.cardSize() / 1024);
-    // DEBUG.printf("- Used: %lu\n", SD.usedBytes() / 1024);
-  }
-  else
-  {
-    DEBUG.println("SD card mount failed.");
-    LED_ERR_ON;
-    LED_REC_OFF;
-    SETSTATE(LED_BLINK, SAP);
-    while (1)
-      delay(1000);
-  }
   LED_ERR_OFF;
   LED_REC_OFF;
   SETSTATE(LED_CYCLE, SAP);
@@ -199,4 +257,9 @@ void Sample(void *param)
     vTaskDelayUntil(&xLastflashTime, 250);
     LED_SAP_OFF;
   }
+}
+
+void LoadConfig()
+{
+  // confFile.getValue("FSD");
 }
