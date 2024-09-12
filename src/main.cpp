@@ -1,3 +1,5 @@
+#include <ModbusMaster.h>
+#include <soc/rtc_wdt.h>
 #include <Arduino.h>
 #include <IniFile.h>
 #include <SPIFFS.h>
@@ -9,6 +11,7 @@
 
 #include "irda.h"
 #include "pinout.h"
+#include "structs.h"
 
 #define DEBUG Serial
 #define RS485 Serial1
@@ -52,14 +55,23 @@ uint8_t CRITICAL_TEMP;
 uint8_t MAX_TEMP;
 byte ONBOARD_SENSOR_ID[8];
 //////
+
 M1820 OnboardTempSensor; // 1 onboard sensor
 M1820 TempSensors[8];    // 8 external sensors
 OneWire oneWire;         // OneWire bus
 int SensorCount = 0;
 uint8_t LED_STATE = 0;
-uint64_t LASTSAMPLE = 0;
+TickType_t PollTime = 0;
 TaskHandle_t TASK_LEDControl = NULL, TASK_Sample = NULL, TASK_Poll = NULL;
+FSDState latest_fsd_status;
 bool sampling = false;
+uint32_t modbus_sent = 0, modbus_error = 0;
+
+ModbusMaster modbus;
+File *recordfile;
+
+void RS485TXNOW();
+void RS485RXNOW();
 
 void LEDControl(void *);
 void Sample(void *);
@@ -75,8 +87,11 @@ void setup()
   pinMode(LED_SAP, OUTPUT);
   pinMode(LED_REC, OUTPUT);
   pinMode(SD_CS, OUTPUT);
+  pinMode(RS485_TNOW, OUTPUT);
+  digitalWrite(RS485_TNOW, LOW); // 保证释放485总线
 
-  TaskHandle_t TASK_HandleOne = NULL;
+  rtc_wdt_set_time(RTC_WDT_STAGE0, 5000);
+
   xTaskCreate(
       LEDControl,        /* 任务函数 */
       "LEDControl",      /* 任务名 */
@@ -119,6 +134,7 @@ void setup()
       while (1)
         delay(1000);
     }
+    SD.mkdir("/records");
   }
   // SD.remove("/config.ini");
   IniFile confFile("/config.ini");
@@ -261,12 +277,15 @@ void setup()
 
   // Communication init
   {
-    DEBUG.println("Init RS485 and IRDA phy...");
+    DEBUG.println("Init RS485 and IRDA...");
     RS485.setPins(RS485_RX, RS485_TX);
     RS485.begin(FSD_BAUD);
     IRDA.setPins(IRDA_RX, IRDA_TX);
     IRDA.begin(IRDA_BAUD);
     IRDA_Init();
+    modbus.begin(FSD_ADDR, RS485);
+    modbus.preTransmission(RS485TXNOW);
+    modbus.postTransmission(RS485RXNOW);
   }
 
   // 1Wire Temperature sensors
@@ -331,6 +350,7 @@ void setup()
       while (1)
         delay(1000);
     }
+    DEBUG.printf("System init done.");
   }
 
   LED_ERR_OFF;
@@ -354,7 +374,7 @@ void setup()
 
 void loop()
 {
-  delay(10000);
+  yield();
 }
 
 inline void _applyLEDState(uint8_t pin, uint8_t state, uint8_t bstate)
@@ -413,26 +433,173 @@ void Sample(void *param)
       continue;
     xLastflashTime = xTaskGetTickCount();
     LED_SAP_ON;
+    bool poll_warn = false;
     { // 在这里采样和保存
+      if (abs(static_cast<long>(PollTime - xLastWakeTime)) > 2 * FSD_POLLINGINTERVAL)
+      {
+        DEBUG.println("WARNING: Polling can't keep up the pace.");
+        LED_ERR_ON;
+        poll_warn = true;
+      }
       M1820::SampleNow();
-      float temp = TempSensors[0].receiveTemperature();
-      DEBUG.printf("Time:%d Temp: %.2f\n", xLastWakeTime, temp);
+      {
+        // 写变频器参数
+        if (poll_warn)
+        {
+          recordfile->printf("%u,POLLING_DID_NOT_KEEP_UP,,,,,,,,,,,,,,,", xLastWakeTime);
+        }
+        else
+        {
+          recordfile->printf("%u,%04hX,%04hX,%f,%f,%d,%d,%f,%f,%f,%f,%f,%d,%d,%d,%d,%04hX",
+                             xLastWakeTime, latest_fsd_status.StateWord, latest_fsd_status.MalfunctionWord,
+                             latest_fsd_status.TargetFrequency, latest_fsd_status.CurrentFrequency,
+                             latest_fsd_status.RailVotage, latest_fsd_status.OutputVotage,
+                             latest_fsd_status.OutputCurrent, latest_fsd_status.OutputPower,
+                             latest_fsd_status.OutputFrequency, latest_fsd_status.OutputTorque,
+                             latest_fsd_status.SystemTemperature, latest_fsd_status.MotorRPM,
+                             latest_fsd_status.AI1Val, latest_fsd_status.AI2Val, latest_fsd_status.PulseInFreq,
+                             latest_fsd_status.DigitalInState);
+        }
+      }
+      {
+        // 写温度传感器参数
+        float temp = OnboardTempSensor.receiveTemperature();
+        recordfile->printf(",%f", temp);
+        for (int i = 0; i < SensorCount; i++)
+        {
+          float temp = TempSensors[i].receiveTemperature();
+          recordfile->printf(",%f", temp);
+        }
+      }
+      {
+        // 写Modbus通信状态
+        recordfile->printf(",%u,%u", modbus_sent, modbus_error);
+      }
+      recordfile->println(); // 行末尾
+      recordfile->flush();   // 写入卡
     }
     vTaskDelayUntil(&xLastflashTime, 150);
     LED_SAP_OFF;
+    if (poll_warn)
+      LED_ERR_OFF;
   }
+}
+
+void RecEnd()
+{
+  sampling = false;
+  recordfile->close();
+  DEBUG.println("Record stop.");
+  LED_REC_OFF;
+}
+
+void RecStart()
+{
+  DEBUG.println("Trigger an rec-start.");
+  if (sampling == true)
+  {
+    DEBUG.println("Already recording. CMD ignore.");
+    return;
+  }
+  char filepath[24];
+  for (int i = 0; i < 2147483647; i++)
+  {
+    sprintf(filepath, "/records/%d.csv", i);
+    if (!SD.exists(filepath))
+      break;
+  }
+  DEBUG.println("Recording into file:");
+  DEBUG.println(filepath);
+
+  File tempFile = SD.open(filepath, "w", true);
+  recordfile = &tempFile;
+  DEBUG.println("Opened that file.");
+  recordfile->print("Time(ms),Status(WORD),Malfunction(WORD),TargetFreq(Hz),CurrentFreq(Hz),RailVoltage(V),OutputVotage(V),OutputCurrent(A),OutputPower(W),OutputFreq(Hz),OutputTorque(Nm),SystemTemp(C),MotorSpeed(RPM),AI1,AI2,PulseIn,DigitalIn(WORD),BoardTemp(C)");
+  for (int i = 0; i < SensorCount; i++)
+  {
+    recordfile->printf(",%02X%02X%02X%02X%02X%02X%02X%02X(C)",
+                       TempSensors[i].Address[0], TempSensors[i].Address[1],
+                       TempSensors[i].Address[2], TempSensors[i].Address[3],
+                       TempSensors[i].Address[4], TempSensors[i].Address[5],
+                       TempSensors[i].Address[6], TempSensors[i].Address[7]);
+  }
+  recordfile->print("Modbus Sent,Modbus Err");
+  recordfile->flush();
+  sampling = true;
+  LED_REC_ON;
 }
 
 void Poll(void *param)
 {
-  TickType_t xLastWakeTime = xTaskGetTickCount();
+  PollTime = xTaskGetTickCount();
   const TickType_t taskPeriod = FSD_POLLINGINTERVAL;
   while (true)
   {
-    vTaskDelayUntil(&xLastWakeTime, taskPeriod);
+    vTaskDelayUntil(&PollTime, taskPeriod);
     {
-      //在这里拉取变频器状态
-
+      // 在这里拉取变频器状态
+      uint8_t scode = modbus.readHoldingRegisters(0x7100, 16);
+      modbus_sent++;
+      if (scode)
+      {
+        latest_fsd_status.StateWord = modbus.getResponseBuffer(0x00);
+        latest_fsd_status.MalfunctionWord = modbus.getResponseBuffer(0x01);
+        latest_fsd_status.TargetFrequency = modbus.getResponseBuffer(0X02) * 0.01;
+        latest_fsd_status.CurrentFrequency = modbus.getResponseBuffer(0x03) * 0.01;
+        latest_fsd_status.RailVotage = modbus.getResponseBuffer(0x04);
+        latest_fsd_status.OutputVotage = modbus.getResponseBuffer(0x05);
+        latest_fsd_status.OutputCurrent = modbus.getResponseBuffer(0x06) * 0.1;
+        latest_fsd_status.OutputFrequency = modbus.getResponseBuffer(0x07) * 0.01;
+        latest_fsd_status.OutputTorque = modbus.getResponseBuffer(0x08) * 0.1;
+        latest_fsd_status.SystemTemperature = modbus.getResponseBuffer(0x09) * 0.1;
+        latest_fsd_status.MotorRPM = modbus.getResponseBuffer(0x0A);
+        latest_fsd_status.AI1Val = modbus.getResponseBuffer(0x0B);
+        latest_fsd_status.AI2Val = modbus.getResponseBuffer(0x0C);
+        latest_fsd_status.PulseInFreq = modbus.getResponseBuffer(0x0D);
+        latest_fsd_status.DigitalInState = modbus.getResponseBuffer(0x0E);
+      }
+      else
+      {
+        DEBUG.printf("Polling FSD status failed with code 0x%02X\n", scode);
+        modbus_error++;
+      }
+      if (!sampling)
+      {
+        switch (START_TRIGGER)
+        {
+        case 1:
+          DEBUG.println("Power-On-Start-Trigger triggered.");
+          RecStart();
+          break;
+        case 2:
+          if (latest_fsd_status.StateWord == 0b0001 || latest_fsd_status.StateWord == 0b0010)
+          {
+            DEBUG.println("FSD-Run-Trigger triggered.");
+            RecStart();
+          }
+          break;
+        }
+      }
+      else
+      {
+        switch (STOP_TRIGGER)
+        {
+        case 1:
+          if (latest_fsd_status.RailVotage <= 100)
+          {
+            DEBUG.println("FSD-Power-Down-Trigger triggered.");
+            RecEnd();
+          }
+          break;
+        case 2:
+          if (latest_fsd_status.StateWord == 0b0011)
+          {
+            DEBUG.println("FSD-Stop-Trigger triggered.");
+            RecStart();
+          }
+          break;
+        }
+      }
     }
   }
 }
@@ -461,4 +628,14 @@ bool isAllZero(byte *bytes, int len)
     if (bytes[i] != 0)
       return false;
   return true;
+}
+
+void RS485TXNOW()
+{
+  digitalWrite(RS485_TNOW, HIGH);
+}
+
+void RS485RXNOW()
+{
+  digitalWrite(RS485_TNOW, LOW);
 }

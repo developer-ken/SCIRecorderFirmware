@@ -17,7 +17,6 @@ public:
 
 private:
     uint8_t _pin;
-    byte _address[8];
 };
 
 #endif

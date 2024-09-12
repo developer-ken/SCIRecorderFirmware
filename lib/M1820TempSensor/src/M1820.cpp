@@ -7,14 +7,14 @@ void M1820::BindAddr(byte addr[8])
 {
     for (int i = 0; i < 8; i++)
     {
-        _address[i] = addr[i];
+        Address[i] = addr[i];
     }
 }
 
 float M1820::receiveTemperature()
 {
     oneWire->reset();         // Reset the 1-Wire bus
-    oneWire->select(_address); // Select the sensor
+    oneWire->select(Address); // Select the sensor
     oneWire->write(0xBE);     // Read data without using scratchpad
 
     byte data[2];
