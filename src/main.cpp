@@ -112,8 +112,9 @@ void setup()
     while (1)
       delay(1000);
   }
-
-  auto testf = SD.open("/test1.txt", FILE_APPEND, true);
+  DEBUG.printf("Heap: %d\n", ESP.getMaxAllocHeap());
+  DEBUG.flush();
+  auto testf = SD.open("/test1xx.txt", FILE_APPEND, true);
   testf.println("Hey, Hello World!");
   testf.close();
   // DEBUG.println("Loading config file...");
