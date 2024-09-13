@@ -68,7 +68,7 @@ bool sampling = false;
 uint32_t modbus_sent = 0, modbus_error = 0;
 
 ModbusMaster modbus;
-File *recordfile;
+File recordfile;
 
 void RS485TXNOW();
 void RS485RXNOW();
@@ -370,7 +370,7 @@ void setup()
   xTaskCreate(
       Poll,        /* 任务函数 */
       "Poll",      /* 任务名 */
-      2 * 1024,    /* 任务栈大小，根据需要自行设置*/
+      4 * 1024,    /* 任务栈大小，根据需要自行设置*/
       NULL,        /* 参数，入参为空 */
       1,           /* 优先级 */
       &TASK_Poll); /* 任务句柄 */
@@ -450,11 +450,11 @@ void Sample(void *param)
         // 写变频器参数
         if (poll_warn)
         {
-          recordfile->printf("%u,POLLING_DID_NOT_KEEP_UP,,,,,,,,,,,,,,,", xLastWakeTime);
+          recordfile.printf("%u,POLLING_DID_NOT_KEEP_UP,,,,,,,,,,,,,,,", xLastWakeTime);
         }
         else
         {
-          recordfile->printf("%u,%04hX,%04hX,%f,%f,%d,%d,%f,%f,%f,%f,%f,%d,%d,%d,%d,%04hX",
+          recordfile.printf("%u,%04hX,%04hX,%f,%f,%d,%d,%f,%f,%f,%f,%f,%d,%d,%d,%d,%04hX",
                              xLastWakeTime, latest_fsd_status.StateWord, latest_fsd_status.MalfunctionWord,
                              latest_fsd_status.TargetFrequency, latest_fsd_status.CurrentFrequency,
                              latest_fsd_status.RailVotage, latest_fsd_status.OutputVotage,
@@ -468,19 +468,19 @@ void Sample(void *param)
       {
         // 写温度传感器参数
         float temp = OnboardTempSensor.receiveTemperature();
-        recordfile->printf(",%f", temp);
+        recordfile.printf(",%f", temp);
         for (int i = 0; i < SensorCount; i++)
         {
           float temp = TempSensors[i].receiveTemperature();
-          recordfile->printf(",%f", temp);
+          recordfile.printf(",%f", temp);
         }
       }
       {
         // 写Modbus通信状态
-        recordfile->printf(",%u,%u", modbus_sent, modbus_error);
+        recordfile.printf(",%u,%u", modbus_sent, modbus_error);
       }
-      recordfile->println(); // 行末尾
-      recordfile->flush();   // 写入卡
+      recordfile.println(); // 行末尾
+      recordfile.flush();   // 写入卡
     }
     vTaskDelayUntil(&xLastflashTime, 150);
     LED_SAP_OFF;
@@ -492,7 +492,8 @@ void Sample(void *param)
 void RecEnd()
 {
   sampling = false;
-  recordfile->close();
+  recordfile.flush();
+  recordfile.close();
   DEBUG.println("Record stop.");
   LED_REC_OFF;
 }
@@ -515,20 +516,20 @@ void RecStart()
   DEBUG.println("Recording into file:");
   DEBUG.println(filepath);
 
-  File tempFile = SD.open(filepath, "w", true);
-  recordfile = &tempFile;
+  recordfile = SD.open(filepath, "w", true);
   DEBUG.println("Opened that file.");
-  recordfile->print("Time(ms),Status(WORD),Malfunction(WORD),TargetFreq(Hz),CurrentFreq(Hz),RailVoltage(V),OutputVotage(V),OutputCurrent(A),OutputPower(W),OutputFreq(Hz),OutputTorque(Nm),SystemTemp(C),MotorSpeed(RPM),AI1,AI2,PulseIn,DigitalIn(WORD),BoardTemp(C)");
+  recordfile.print("Time(ms),Status(WORD),Malfunction(WORD),TargetFreq(Hz),CurrentFreq(Hz),RailVoltage(V),OutputVotage(V),OutputCurrent(A),OutputPower(W),OutputFreq(Hz),OutputTorque(Nm),SystemTemp(C),MotorSpeed(RPM),AI1,AI2,PulseIn,DigitalIn(WORD),BoardTemp(C)");
   for (int i = 0; i < SensorCount; i++)
   {
-    recordfile->printf(",%02X%02X%02X%02X%02X%02X%02X%02X(C)",
+    recordfile.printf(",%02X%02X%02X%02X%02X%02X%02X%02X(C)",
                        TempSensors[i].Address[0], TempSensors[i].Address[1],
                        TempSensors[i].Address[2], TempSensors[i].Address[3],
                        TempSensors[i].Address[4], TempSensors[i].Address[5],
                        TempSensors[i].Address[6], TempSensors[i].Address[7]);
   }
-  recordfile->print("Modbus Sent,Modbus Err");
-  recordfile->flush();
+  recordfile.print(",Modbus Sent,Modbus Err");
+  recordfile.println();
+  recordfile.flush();
   sampling = true;
   LED_REC_ON;
 }
@@ -580,8 +581,10 @@ void Poll(void *param)
         switch (START_TRIGGER)
         {
         case 1:
-          DEBUG.println("Power-On-Start-Trigger triggered.");
-          RecStart();
+          if(latest_fsd_status.RailVotage > 450){
+            DEBUG.println("Power-On-Start-Trigger triggered.");
+            RecStart();
+          }
           break;
         case 2:
           if (latest_fsd_status.StateWord == 0b0001 || latest_fsd_status.StateWord == 0b0010)
