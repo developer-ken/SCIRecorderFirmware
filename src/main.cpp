@@ -317,9 +317,11 @@ void setup()
       if (set_obsid)
       {
         File conffile = SD.open("/config.ini", "a");
-        conffile.printf("\nOnboardSensorId = %02X%02X%02X%02X%02X%02X%02X%02X\n",
+        conffile.println();
+        conffile.printf("OnboardSensorId = %02X%02X%02X%02X%02X%02X%02X%02X",
                         address[0], address[1], address[2], address[3],
                         address[4], address[5], address[6], address[7]);
+        conffile.println();
         conffile.close();
         set_obsid = false;
         DEBUG.println("! ONBOARD_SENSOR_ID set.");
