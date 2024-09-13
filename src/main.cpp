@@ -356,10 +356,6 @@ void setup()
     }
     DEBUG.println("System init done.");
   }
-
-  LED_ERR_OFF;
-  LED_REC_OFF;
-  SETSTATE(LED_CYCLE, SAP);
   xTaskCreate(
       Sample,        /* 任务函数 */
       "Sample",      /* 任务名 */
@@ -374,6 +370,9 @@ void setup()
       NULL,        /* 参数，入参为空 */
       1,           /* 优先级 */
       &TASK_Poll); /* 任务句柄 */
+  LED_ERR_OFF;
+  LED_SAP_OFF;
+  SETSTATE(LED_CYCLE, REC);
 }
 
 void loop()
@@ -429,12 +428,13 @@ void Sample(void *param)
   TickType_t xLastWakeTime = xTaskGetTickCount();
   TickType_t xLastflashTime;
   const TickType_t taskPeriod = SAMPLE_INTERVAL;
-  LED_SAP_OFF;
   while (true)
   {
     vTaskDelayUntil(&xLastWakeTime, taskPeriod);
     if (!sampling)
+    {
       continue;
+    }
     xLastflashTime = xTaskGetTickCount();
     LED_SAP_ON;
     bool poll_warn = false;
@@ -455,14 +455,14 @@ void Sample(void *param)
         else
         {
           recordfile.printf("%u,%04hX,%04hX,%f,%f,%d,%d,%f,%f,%f,%f,%f,%d,%d,%d,%d,%04hX",
-                             xLastWakeTime, latest_fsd_status.StateWord, latest_fsd_status.MalfunctionWord,
-                             latest_fsd_status.TargetFrequency, latest_fsd_status.CurrentFrequency,
-                             latest_fsd_status.RailVotage, latest_fsd_status.OutputVotage,
-                             latest_fsd_status.OutputCurrent, latest_fsd_status.OutputPower,
-                             latest_fsd_status.OutputFrequency, latest_fsd_status.OutputTorque,
-                             latest_fsd_status.SystemTemperature, latest_fsd_status.MotorRPM,
-                             latest_fsd_status.AI1Val, latest_fsd_status.AI2Val, latest_fsd_status.PulseInFreq,
-                             latest_fsd_status.DigitalInState);
+                            xLastWakeTime, latest_fsd_status.StateWord, latest_fsd_status.MalfunctionWord,
+                            latest_fsd_status.TargetFrequency, latest_fsd_status.CurrentFrequency,
+                            latest_fsd_status.RailVotage, latest_fsd_status.OutputVotage,
+                            latest_fsd_status.OutputCurrent, latest_fsd_status.OutputPower,
+                            latest_fsd_status.OutputFrequency, latest_fsd_status.OutputTorque,
+                            latest_fsd_status.SystemTemperature, latest_fsd_status.MotorRPM,
+                            latest_fsd_status.AI1Val, latest_fsd_status.AI2Val, latest_fsd_status.PulseInFreq,
+                            latest_fsd_status.DigitalInState);
         }
       }
       {
@@ -522,10 +522,10 @@ void RecStart()
   for (int i = 0; i < SensorCount; i++)
   {
     recordfile.printf(",%02X%02X%02X%02X%02X%02X%02X%02X(C)",
-                       TempSensors[i].Address[0], TempSensors[i].Address[1],
-                       TempSensors[i].Address[2], TempSensors[i].Address[3],
-                       TempSensors[i].Address[4], TempSensors[i].Address[5],
-                       TempSensors[i].Address[6], TempSensors[i].Address[7]);
+                      TempSensors[i].Address[0], TempSensors[i].Address[1],
+                      TempSensors[i].Address[2], TempSensors[i].Address[3],
+                      TempSensors[i].Address[4], TempSensors[i].Address[5],
+                      TempSensors[i].Address[6], TempSensors[i].Address[7]);
   }
   recordfile.print(",Modbus Sent,Modbus Err");
   recordfile.println();
@@ -564,14 +564,14 @@ void Poll(void *param)
         latest_fsd_status.DigitalInState = modbus.getResponseBuffer(0x0E);
         if (!sampling)
         {
-          SETSTATE(LED_CYCLE, REC);
+          SETSTATE(LED_CYCLE, ERR);
         }
       }
       else
       {
         if (!sampling)
         {
-          LED_REC_OFF;
+          LED_ERR_OFF;
         }
         DEBUG.printf("Polling FSD status failed with code 0x%02X\n", scode);
         modbus_error++;
@@ -581,7 +581,8 @@ void Poll(void *param)
         switch (START_TRIGGER)
         {
         case 1:
-          if(latest_fsd_status.RailVotage > 450){
+          if (latest_fsd_status.RailVotage > 450)
+          {
             DEBUG.println("Power-On-Start-Trigger triggered.");
             RecStart();
           }
