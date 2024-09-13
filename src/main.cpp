@@ -76,6 +76,7 @@ void RS485RXNOW();
 void LEDControl(void *);
 void Sample(void *);
 void Poll(void *);
+void IOHangup();
 void LoadConfig();
 bool isAllZero(byte *bytes, int len);
 void hexStringToByteArray(const char *hexString, unsigned char *byteArray, size_t byteArraySize);
@@ -90,7 +91,7 @@ void setup()
   pinMode(RS485_TNOW, OUTPUT);
   digitalWrite(RS485_TNOW, LOW); // 保证释放485总线
 
-  rtc_wdt_set_time(RTC_WDT_STAGE0, 5000);
+  rtc_wdt_set_time(RTC_WDT_STAGE0, 1000);
 
   xTaskCreate(
       LEDControl,        /* 任务函数 */
@@ -286,6 +287,7 @@ void setup()
     modbus.begin(FSD_ADDR, RS485);
     modbus.preTransmission(RS485TXNOW);
     modbus.postTransmission(RS485RXNOW);
+    modbus.idle(IOHangup); // yield when idle, preventing blocking.
   }
 
   // 1Wire Temperature sensors
@@ -350,7 +352,7 @@ void setup()
       while (1)
         delay(1000);
     }
-    DEBUG.printf("System init done.");
+    DEBUG.println("System init done.");
   }
 
   LED_ERR_OFF;
@@ -540,7 +542,7 @@ void Poll(void *param)
       // 在这里拉取变频器状态
       uint8_t scode = modbus.readHoldingRegisters(0x7100, 16);
       modbus_sent++;
-      if (scode)
+      if (scode == 0)
       {
         latest_fsd_status.StateWord = modbus.getResponseBuffer(0x00);
         latest_fsd_status.MalfunctionWord = modbus.getResponseBuffer(0x01);
@@ -557,9 +559,17 @@ void Poll(void *param)
         latest_fsd_status.AI2Val = modbus.getResponseBuffer(0x0C);
         latest_fsd_status.PulseInFreq = modbus.getResponseBuffer(0x0D);
         latest_fsd_status.DigitalInState = modbus.getResponseBuffer(0x0E);
+        if (!sampling)
+        {
+          SETSTATE(LED_CYCLE, REC);
+        }
       }
       else
       {
+        if (!sampling)
+        {
+          LED_REC_OFF;
+        }
         DEBUG.printf("Polling FSD status failed with code 0x%02X\n", scode);
         modbus_error++;
       }
@@ -638,4 +648,9 @@ void RS485TXNOW()
 void RS485RXNOW()
 {
   digitalWrite(RS485_TNOW, LOW);
+}
+
+void IOHangup()
+{
+  delay(10);
 }
