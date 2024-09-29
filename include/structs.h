@@ -10,6 +10,7 @@ struct FSDState
         OutputTorque, SystemTemperature;
     int RailVotage, OutputVotage, OutputPower,
         MotorRPM, AI1Val, AI2Val, PulseInFreq;
+    uint16_t Raw[16];
 };
 
 #endif

@@ -69,6 +69,7 @@ uint32_t modbus_sent = 0, modbus_error = 0;
 
 ModbusMaster modbus;
 File recordfile;
+File rawfile;
 
 void RS485TXNOW();
 void RS485RXNOW();
@@ -463,6 +464,8 @@ void Sample(void *param)
                             latest_fsd_status.SystemTemperature, latest_fsd_status.MotorRPM,
                             latest_fsd_status.AI1Val, latest_fsd_status.AI2Val, latest_fsd_status.PulseInFreq,
                             latest_fsd_status.DigitalInState);
+          rawfile.write((byte *)(&xLastWakeTime), 4);            //时间戳   4byte
+          rawfile.write((byte *)(latest_fsd_status.Raw), 32);    //寄存器值 32byte (16寄存器*2byte)
         }
       }
       {
@@ -481,6 +484,7 @@ void Sample(void *param)
       }
       recordfile.println(); // 行末尾
       recordfile.flush();   // 写入卡
+      rawfile.flush();      // 寄存器记录写入卡
     }
     vTaskDelayUntil(&xLastflashTime, 150);
     LED_SAP_OFF;
@@ -494,6 +498,8 @@ void RecEnd()
   sampling = false;
   recordfile.flush();
   recordfile.close();
+  rawfile.flush();
+  rawfile.close();
   DEBUG.println("Record stop.");
   LED_REC_OFF;
 }
@@ -517,6 +523,7 @@ void RecStart()
   DEBUG.println(filepath);
 
   recordfile = SD.open(filepath, "w", true);
+  rawfile = SD.open(String(filepath) + ".hex", "w", true);
   DEBUG.println("Opened that file.");
   recordfile.print("Time(ms),Status(WORD),Malfunction(WORD),TargetFreq(Hz),CurrentFreq(Hz),RailVoltage(V),OutputVotage(V),OutputCurrent(A),OutputPower(W),OutputFreq(Hz),OutputTorque(Nm),SystemTemp(C),MotorSpeed(RPM),AI1,AI2,PulseIn,DigitalIn(WORD),BoardTemp(C)");
   for (int i = 0; i < SensorCount; i++)
@@ -547,6 +554,10 @@ void Poll(void *param)
       modbus_sent++;
       if (scode == 0)
       {
+        for (int i = 0; i < 16; i++)
+        {
+          latest_fsd_status.Raw[i] = modbus.getResponseBuffer(i);
+        }
         latest_fsd_status.StateWord = modbus.getResponseBuffer(0x00);
         latest_fsd_status.MalfunctionWord = modbus.getResponseBuffer(0x01);
         latest_fsd_status.TargetFrequency = modbus.getResponseBuffer(0X02) * 0.01;
