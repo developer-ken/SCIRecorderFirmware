@@ -525,7 +525,7 @@ void RecStart()
   recordfile = SD.open(filepath, "w", true);
   rawfile = SD.open(String(filepath) + ".hex", "w", true);
   DEBUG.println("Opened that file.");
-  recordfile.print("Time(ms),Status(WORD),Malfunction(WORD),TargetFreq(Hz),CurrentFreq(Hz),RailVoltage(V),OutputVotage(V),OutputCurrent(A),OutputPower(W),OutputFreq(Hz),OutputTorque(Nm),SystemTemp(C),MotorSpeed(RPM),AI1,AI2,PulseIn,DigitalIn(WORD),BoardTemp(C)");
+  recordfile.print("Time(ms),Status(WORD),Malfunction(WORD),TargetFreq(Hz),CurrentFreq(Hz),RailVoltage(V),OutputVotage(V),OutputCurrent(A),OutputPower(W),OutputFreq(Hz),OutputTorque(%),SystemTemp(C),MotorSpeed(RPM),AI1(V),AI2(V),PulseIn(kHz),DigitalIn(WORD),BoardTemp(C)");
   for (int i = 0; i < SensorCount; i++)
   {
     recordfile.printf(",%02X%02X%02X%02X%02X%02X%02X%02X(C)",
@@ -565,24 +565,25 @@ void Poll(void *param)
         latest_fsd_status.RailVotage = modbus.getResponseBuffer(0x04);
         latest_fsd_status.OutputVotage = modbus.getResponseBuffer(0x05);
         latest_fsd_status.OutputCurrent = modbus.getResponseBuffer(0x06) * 0.1;
-        latest_fsd_status.OutputFrequency = modbus.getResponseBuffer(0x07) * 0.01;
-        latest_fsd_status.OutputTorque = modbus.getResponseBuffer(0x08) * 0.1;
-        latest_fsd_status.SystemTemperature = modbus.getResponseBuffer(0x09) * 0.1;
-        latest_fsd_status.MotorRPM = modbus.getResponseBuffer(0x0A);
-        latest_fsd_status.AI1Val = modbus.getResponseBuffer(0x0B);
-        latest_fsd_status.AI2Val = modbus.getResponseBuffer(0x0C);
-        latest_fsd_status.PulseInFreq = modbus.getResponseBuffer(0x0D);
-        latest_fsd_status.DigitalInState = modbus.getResponseBuffer(0x0E);
+        latest_fsd_status.OutputPower = modbus.getResponseBuffer(0x07) * 0.1;
+        latest_fsd_status.OutputFrequency = modbus.getResponseBuffer(0x08) * 0.01;
+        latest_fsd_status.OutputTorque = modbus.getResponseBuffer(0x09) * 0.1;
+        latest_fsd_status.SystemTemperature = modbus.getResponseBuffer(0x0A) * 0.1;
+        latest_fsd_status.MotorRPM = modbus.getResponseBuffer(0x0B);
+        latest_fsd_status.AI1Val = modbus.getResponseBuffer(0x0C)*0.01;
+        latest_fsd_status.AI2Val = modbus.getResponseBuffer(0x0D)*0.01;
+        latest_fsd_status.PulseInFreq = modbus.getResponseBuffer(0x0E)*0.01;
+        latest_fsd_status.DigitalInState = modbus.getResponseBuffer(0x0F);
         if (!sampling)
         {
-          SETSTATE(LED_CYCLE, ERR);
+          LED_ERR_OFF;
         }
       }
       else
       {
         if (!sampling)
         {
-          LED_ERR_OFF;
+          SETSTATE(LED_CYCLE, ERR);
         }
         DEBUG.printf("Polling FSD status failed with code 0x%02X\n", scode);
         modbus_error++;
