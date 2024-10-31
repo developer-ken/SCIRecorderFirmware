@@ -346,7 +346,7 @@ void setup()
       SensorCount++;
     }
     DEBUG.printf("Scan complete. %d sensors found.\n", SensorCount);
-    if (TempSensors[SensorCount].Valid = false)
+    if (TempSensors[SensorCount].Valid == false)
     {
       DEBUG.println("Error: Onboard sensor not found on bus.");
       LED_ERR_ON;
@@ -356,6 +356,19 @@ void setup()
         delay(1000);
     }
     DEBUG.println("System init done.");
+  }
+
+  // Working temperature check
+  {
+    DEBUG.println("Checking working temperature...");
+    OnboardTempSensor.SampleNow();
+    float temperature = OnboardTempSensor.receiveTemperature();
+    DEBUG.printf("TEMP_OB_SENSOR=%f\n", temperature);
+    if (temperature < -25 || temperature > 80)
+    {
+      DEBUG.println("Warning: System designed to work only under -25°C ~ 80°C.");
+      SETSTATE(LED_BLINK, ERR);
+    }
   }
   xTaskCreate(
       Sample,        /* 任务函数 */
@@ -464,8 +477,8 @@ void Sample(void *param)
                             latest_fsd_status.SystemTemperature, latest_fsd_status.MotorRPM,
                             latest_fsd_status.AI1Val, latest_fsd_status.AI2Val, latest_fsd_status.PulseInFreq,
                             latest_fsd_status.DigitalInState);
-          rawfile.write((byte *)(&xLastWakeTime), 4);            //时间戳   4byte
-          rawfile.write((byte *)(latest_fsd_status.Raw), 32);    //寄存器值 32byte (16寄存器*2byte)
+          rawfile.write((byte *)(&xLastWakeTime), 4);         // 时间戳   4byte
+          rawfile.write((byte *)(latest_fsd_status.Raw), 32); // 寄存器值 32byte (16寄存器*2byte)
         }
       }
       {
@@ -474,8 +487,13 @@ void Sample(void *param)
         recordfile.printf(",%f", temp);
         for (int i = 0; i < SensorCount; i++)
         {
-          float temp = TempSensors[i].receiveTemperature();
+          temp = TempSensors[i].receiveTemperature();
           recordfile.printf(",%f", temp);
+        }
+        if (temp < -25 || temp > 80)
+        {
+          DEBUG.printf("Warning: TEMP_OB_SENSOR=%f overrange! (-25°C ~ 80°C)\n", temp);
+          SETSTATE(LED_BLINK, ERR);
         }
       }
       {
@@ -570,9 +588,9 @@ void Poll(void *param)
         latest_fsd_status.OutputTorque = modbus.getResponseBuffer(0x09) * 0.1;
         latest_fsd_status.SystemTemperature = modbus.getResponseBuffer(0x0A) * 0.1;
         latest_fsd_status.MotorRPM = modbus.getResponseBuffer(0x0B);
-        latest_fsd_status.AI1Val = modbus.getResponseBuffer(0x0C)*0.01;
-        latest_fsd_status.AI2Val = modbus.getResponseBuffer(0x0D)*0.01;
-        latest_fsd_status.PulseInFreq = modbus.getResponseBuffer(0x0E)*0.01;
+        latest_fsd_status.AI1Val = modbus.getResponseBuffer(0x0C) * 0.01;
+        latest_fsd_status.AI2Val = modbus.getResponseBuffer(0x0D) * 0.01;
+        latest_fsd_status.PulseInFreq = modbus.getResponseBuffer(0x0E) * 0.01;
         latest_fsd_status.DigitalInState = modbus.getResponseBuffer(0x0F);
         if (!sampling)
         {
