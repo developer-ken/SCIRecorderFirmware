@@ -716,7 +716,7 @@ void Poll(void *param)
         latest_fsd_status.OutputCurrent = modbus.getResponseBuffer(0x06) * 0.1;
         latest_fsd_status.OutputPower = (int16_t)modbus.getResponseBuffer(0x07) * 0.1;
         latest_fsd_status.OutputFrequency = modbus.getResponseBuffer(0x08) * 0.01;
-        latest_fsd_status.OutputTorque = modbus.getResponseBuffer(0x09) * 0.1;
+        latest_fsd_status.OutputTorque = (int16_t)modbus.getResponseBuffer(0x09) * 0.1;
         latest_fsd_status.SystemTemperature = (int16_t)modbus.getResponseBuffer(0x0A) * 0.1;
         latest_fsd_status.MotorRPM = modbus.getResponseBuffer(0x0B);
         latest_fsd_status.AI1Val = modbus.getResponseBuffer(0x0C) * 0.01;
