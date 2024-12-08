@@ -762,7 +762,7 @@ void Poll(void *param)
         switch (STOP_TRIGGER)
         {
         case 1:
-          if (latest_fsd_status.RailVotage <= 100)
+          if (latest_fsd_status.RailVotage <= 200)
           {
             DEBUG.println("FSD-Power-Down-Trigger triggered.");
             RecEnd();
