@@ -6,12 +6,25 @@
 #include <M1820.h>
 #include <SPI.h>
 
+#include <WiFi.h>
+#include <WiFiAP.h>
+#include <DNSServer.h>
+#include <WebServer.h>
+#include <uri/UriRegex.h>
+#include <uri/UriBraces.h>
+
 #include <SD.h>
 #include <FS.h>
 
 #include "irda.h"
 #include "pinout.h"
 #include "structs.h"
+
+#ifdef ENABLE_RTC
+#include <Wire.h>
+#include <RtcDS1307.h>
+RtcDS1307<TwoWire> Rtc(Wire);
+#endif
 
 #define DEBUG Serial
 #define RS485 Serial1
@@ -36,24 +49,30 @@
 #define LED_REC_OFF SETSTATE(LED_OFF, REC)
 
 //////
-uint8_t FSD_ADDR;
-uint32_t FSD_BAUD;
-uint32_t FSD_POLLINGINTERVAL;
+uint8_t FSD_ADDR = 1;
+uint32_t FSD_BAUD = 9600;
+uint32_t FSD_POLLINGINTERVAL = 500;
 
-uint8_t IRDA_ADDR;
-uint32_t IRDA_BAUD;
-bool IRDA_ALLOWCTRL;
+uint8_t IRDA_ADDR = 1;
+uint32_t IRDA_BAUD = 4800;
+bool IRDA_ALLOWCTRL = false;
 
-String ESPNOW_KEY;
-bool ESPNOW_ALLOWCTRL;
+String ESPNOW_KEY = "CFFF00CE";
+bool ESPNOW_ALLOWCTRL = 0;
 
-uint8_t START_TRIGGER,
-    STOP_TRIGGER;
-uint32_t SAMPLE_INTERVAL = 5000; // ms, 采样周期
+uint8_t START_TRIGGER = 1,
+        STOP_TRIGGER = 1;
+uint32_t SAMPLE_INTERVAL = 1000; // ms, 采样周期
 
-uint8_t CRITICAL_TEMP;
-uint8_t MAX_TEMP;
+uint8_t CRITICAL_TEMP = 80;
+uint8_t MAX_TEMP = 85;
 byte ONBOARD_SENSOR_ID[8];
+
+String WIFI_AP_SSID = "KD510-IOT-EXT";
+String WIFI_AP_PASSWORD = "12345678";
+int WIFI_AP_CHANNEL = 1;
+int WIFI_MAX_CLIENTS = 2;
+bool WIFI_HIDDEN = false;
 //////
 
 M1820 OnboardTempSensor; // 1 onboard sensor
@@ -66,10 +85,18 @@ TaskHandle_t TASK_LEDControl = NULL, TASK_Sample = NULL, TASK_Poll = NULL;
 FSDState latest_fsd_status;
 bool sampling = false;
 uint32_t modbus_sent = 0, modbus_error = 0;
-
+WiFiAPClass WiFiAP;
 ModbusMaster modbus;
 File recordfile;
 File rawfile;
+
+bool DEBUG_MODE = false;      // Use debug mode, will override self-test result so can continue anyway.
+bool DEBUG_NO_SDCARD = false; // In debug move, no SD card found, worlaround so can continue anyway.
+
+char *FirmwareCompiletimeHash = __TIME__ " " __DATE__;
+
+WebServer webServer(80);
+DNSServer dnsServer;
 
 void RS485TXNOW();
 void RS485RXNOW();
@@ -83,14 +110,25 @@ bool isAllZero(byte *bytes, int len);
 void hexStringToByteArray(const char *hexString, unsigned char *byteArray, size_t byteArraySize);
 bool bytesEquals(byte *bytes1, byte *bytes2, int len);
 
+void HandleRootWeb();
+void GetStatus();
+void ListFiles();
+void SetTime();
+void DownloadFile();
+
 void setup()
 {
   pinMode(LED_ERR, OUTPUT);
   pinMode(LED_SAP, OUTPUT);
   pinMode(LED_REC, OUTPUT);
   pinMode(SD_CS, OUTPUT);
+  pinMode(DEBUG_SWITCH, INPUT_PULLUP);
   pinMode(RS485_TNOW, OUTPUT);
   digitalWrite(RS485_TNOW, LOW); // 保证释放485总线
+
+  analogWriteFrequency(10000);
+
+  DEBUG_MODE = digitalRead(DEBUG_SWITCH) == LOW;
 
   rtc_wdt_set_time(RTC_WDT_STAGE0, 1000);
 
@@ -114,6 +152,31 @@ void setup()
   DEBUG.print(__TIME__);
   DEBUG.print("\n");
 
+  if (DEBUG_MODE)
+  {
+    DEBUG.println("* DEBUG_MODE_ENABLED *");
+  }
+
+#ifdef ENABLE_RTC
+  DEBUG.println("* Firmware has RTC enabled *");
+  DEBUG.println("Probing...");
+  Wire.setPins(RTC_SDA, RTC_SCL);
+  Rtc.Begin();
+  uint8_t rtcmem[55];
+  Rtc.GetMemory(0, rtcmem, 55);
+  if (!Rtc.IsDateTimeValid() || strcmp((FirmwareCompiletimeHash), (char *)rtcmem) != 0)
+  {
+    DEBUG.println("! RTC datetime invalid, setting to compile time...");
+    RtcDateTime compile = RtcDateTime(__DATE__, __TIME__);
+    Rtc.SetDateTime(compile);
+    Rtc.SetMemory(0, (uint8_t *)FirmwareCompiletimeHash, strlen(FirmwareCompiletimeHash) + 1);
+    Rtc.SetIsRunning(true);
+  }
+  RtcDateTime now = Rtc.GetDateTime();
+
+  DEBUG.printf("RTC datetime: %4d-%02d-%02d %02d:%02d:%02d\n", now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second());
+#endif
+
   // Mount SD card
   {
     DEBUG.println("Mounting SD card...");
@@ -133,150 +196,177 @@ void setup()
       LED_ERR_ON;
       LED_SAP_ON;
       SETSTATE(LED_BLINK, REC);
-      while (1)
-        delay(1000);
-    }
-    SD.mkdir("/records");
-  }
-  // SD.remove("/config.ini");
-  IniFile confFile("/config.ini");
-  // Load/Prepare config
-  {
-    DEBUG.println("Loading config...");
-    if (!SD.exists("/config.ini"))
-    {
-      DEBUG.println("/config.ini does not exists.");
-      DEBUG.println("- extracting default from SPIFFS...");
-      if (!SPIFFS.begin(true) || !SPIFFS.exists("/config.ini"))
+
+      if (DEBUG_MODE)
       {
-        DEBUG.println("FAILED. SPIFFS partition not correctly programmed.");
+        delay(3000);
+        DEBUG.println("* DEBUG_MODE override *");
+        DEBUG_NO_SDCARD = true;
+      }
+      else
+        while (1)
+          delay(1000);
+    }
+    if (!DEBUG_NO_SDCARD)
+      SD.mkdir("/records");
+  }
+
+  IniFile confFile("/config.ini");
+  if (DEBUG_NO_SDCARD)
+  {
+    DEBUG.println("* DEBUG_NO_SDCARD override *");
+    DEBUG.println("Skip config loading, using developer default.");
+  }
+  else
+  {
+    // Load/Prepare config
+    {
+      DEBUG.println("Loading config...");
+      if (!SD.exists("/config.ini"))
+      {
+        DEBUG.println("/config.ini does not exists.");
+        DEBUG.println("- extracting default from SPIFFS...");
+        if (!SPIFFS.begin(true) || !SPIFFS.exists("/config.ini"))
+        {
+          DEBUG.println("FAILED. SPIFFS partition not correctly programmed.");
+          LED_ERR_ON;
+          SETSTATE(LED_BLINK, SAP);
+          LED_REC_OFF;
+          while (1)
+            delay(1000);
+        }
+        File defconf = SPIFFS.open("/config.ini");
+        File sdconf = SD.open("/config.ini", "w", true);
+        uint8_t copybuf[64];
+        while (defconf.available())
+        {
+          defconf.read(copybuf, sizeof(copybuf));
+          sdconf.write(copybuf, sizeof(copybuf));
+        }
+        sdconf.flush();
+        if (sdconf.size() == defconf.size())
+        {
+          DEBUG.println("Done.");
+        }
+        else
+        {
+          DEBUG.println("Writing failed maybe? continue anyway.");
+        }
+        defconf.close();
+        sdconf.close();
+      }
+      if (!confFile.open())
+      {
+        DEBUG.println("/config.ini open failed.");
         LED_ERR_ON;
         SETSTATE(LED_BLINK, SAP);
         LED_REC_OFF;
         while (1)
           delay(1000);
       }
-      File defconf = SPIFFS.open("/config.ini");
-      File sdconf = SD.open("/config.ini", "w", true);
-      uint8_t copybuf[64];
-      while (defconf.available())
+    }
+
+    // Parse config
+    {
+      char inibuffer[128];
+      char inivaluebuffer[128];
+      String inival;
+      if (!confFile.validate(inibuffer, 128))
       {
-        defconf.read(copybuf, sizeof(copybuf));
-        sdconf.write(copybuf, sizeof(copybuf));
+        inibuffer[127] = '\0';
+        DEBUG.println("Config file invalid:");
+        DEBUG.println(inibuffer);
+        LED_ERR_ON;
+        SETSTATE(LED_BLINK, SAP);
+        LED_REC_OFF;
+        while (1)
+          delay(1000);
       }
-      sdconf.flush();
-      if (sdconf.size() == defconf.size())
+      bool ls = true;
+      ls &= confFile.getValue("FSD", "Address", inivaluebuffer, 128);
+      FSD_ADDR = (inival = inivaluebuffer).toInt();
+      ls &= confFile.getValue("FSD", "Baudrate", inivaluebuffer, 128);
+      FSD_BAUD = (inival = inivaluebuffer).toInt();
+      ls &= confFile.getValue("FSD", "PollInterval", inivaluebuffer, 128);
+      FSD_POLLINGINTERVAL = (inival = inivaluebuffer).toInt();
+
+      ls &= confFile.getValue("IRDA", "Address", inivaluebuffer, 128);
+      IRDA_ADDR = (inival = inivaluebuffer).toInt();
+      ls &= confFile.getValue("IRDA", "Baudrate", inivaluebuffer, 128);
+      IRDA_BAUD = (inival = inivaluebuffer).toInt();
+      ls &= confFile.getValue("IRDA", "AllowControl", inivaluebuffer, 128);
+      IRDA_ALLOWCTRL = inivaluebuffer[0] == '1';
+
+      ls &= confFile.getValue("ESPNOW", "NetKey", inivaluebuffer, 128);
+      ESPNOW_KEY = inivaluebuffer;
+      ls &= confFile.getValue("ESPNOW", "AllowControl", inivaluebuffer, 128);
+      ESPNOW_ALLOWCTRL = inivaluebuffer[0] == '1';
+
+      ls &= confFile.getValue("WIFIAP", "SSID", inivaluebuffer, 128);
+      WIFI_AP_SSID = inivaluebuffer;
+      ls &= confFile.getValue("WIFIAP", "Passphrase", inivaluebuffer, 128);
+      WIFI_AP_PASSWORD = inivaluebuffer;
+      ls &= confFile.getValue("WIFIAP", "Channel", inivaluebuffer, 128);
+      WIFI_AP_CHANNEL = (inival = inivaluebuffer).toInt();
+      ls &= confFile.getValue("WIFIAP", "Hidden", inivaluebuffer, 128);
+      WIFI_HIDDEN = inivaluebuffer[0] == '1';
+      ls &= confFile.getValue("WIFIAP", "Clients", inivaluebuffer, 128);
+      WIFI_MAX_CLIENTS = (inival = inivaluebuffer).toInt();
+
+      ls &= confFile.getValue("Sample", "StartTrigger", inivaluebuffer, 128);
+      START_TRIGGER = (inival = inivaluebuffer).toInt();
+      ls &= confFile.getValue("Sample", "StopTrigger", inivaluebuffer, 128);
+      STOP_TRIGGER = (inival = inivaluebuffer).toInt();
+      ls &= confFile.getValue("Sample", "Interval", inivaluebuffer, 128);
+      SAMPLE_INTERVAL = (inival = inivaluebuffer).toInt();
+
+      ls &= confFile.getValue("Sensor", "BoardCriticalTemp", inivaluebuffer, 128);
+      CRITICAL_TEMP = (inival = inivaluebuffer).toInt();
+      ls &= confFile.getValue("Sensor", "BoardMaxTemp", inivaluebuffer, 128);
+      MAX_TEMP = (inival = inivaluebuffer).toInt();
+      if (confFile.getValue("Sensor", "OnboardSensorId", inivaluebuffer, 128))
       {
-        DEBUG.println("Done.");
+        hexStringToByteArray(inivaluebuffer, ONBOARD_SENSOR_ID, sizeof(ONBOARD_SENSOR_ID));
       }
       else
       {
-        DEBUG.println("Writing failed maybe? continue anyway.");
+        memset(ONBOARD_SENSOR_ID, 0, sizeof(ONBOARD_SENSOR_ID));
       }
-      defconf.close();
-      sdconf.close();
-    }
-    if (!confFile.open())
-    {
-      DEBUG.println("/config.ini open failed.");
-      LED_ERR_ON;
-      SETSTATE(LED_BLINK, SAP);
-      LED_REC_OFF;
-      while (1)
-        delay(1000);
-    }
-  }
 
-  // Parse config
-  {
-    char inibuffer[128];
-    char inivaluebuffer[128];
-    String inival;
-    if (!confFile.validate(inibuffer, 128))
-    {
-      inibuffer[127] = '\0';
-      DEBUG.println("Config file invalid:");
-      DEBUG.println(inibuffer);
-      LED_ERR_ON;
-      SETSTATE(LED_BLINK, SAP);
-      LED_REC_OFF;
-      while (1)
-        delay(1000);
-    }
-    bool ls = true;
-    ls &= confFile.getValue("FSD", "Address", inivaluebuffer, 128);
-    FSD_ADDR = (inival = inivaluebuffer).toInt();
-    ls &= confFile.getValue("FSD", "Baudrate", inivaluebuffer, 128);
-    FSD_BAUD = (inival = inivaluebuffer).toInt();
-    ls &= confFile.getValue("FSD", "PollInterval", inivaluebuffer, 128);
-    FSD_POLLINGINTERVAL = (inival = inivaluebuffer).toInt();
+      confFile.close();
+      DEBUG.println("---- Current Configuration ----");
+      DEBUG.printf("FSD_ADDR=%02X\n", FSD_ADDR);
+      DEBUG.printf("FSD_BAUD=%d\n", FSD_BAUD);
+      DEBUG.printf("FSD_POLL=%d\n", FSD_POLLINGINTERVAL);
+      DEBUG.printf("IRDA_ADDR=%02X\n", IRDA_ADDR);
+      DEBUG.printf("IRDA_BAUD=%d\n", IRDA_BAUD);
+      DEBUG.printf("IRDA_CTRL=%c\n", IRDA_ALLOWCTRL ? 'Y' : 'N');
+      DEBUG.printf("ESPN_KEY=%s\n", ESPNOW_KEY.c_str());
+      DEBUG.printf("ESPN_CTRL=%c\n", ESPNOW_ALLOWCTRL ? 'Y' : 'N');
+      DEBUG.printf("START_TRIGGER=%d\n", START_TRIGGER);
+      DEBUG.printf("STOP_TRIGGER=%d\n", STOP_TRIGGER);
+      DEBUG.printf("SAMPLE_INTERVAL=%d\n", SAMPLE_INTERVAL);
+      DEBUG.printf("CRITICAL_TEMP=%d\n", CRITICAL_TEMP);
+      DEBUG.printf("MAX_TEMP=%d\n", MAX_TEMP);
+      DEBUG.printf("ONBOARD_SENSOR_ID=%02X%02X%02X%02X%02X%02X%02X%02X\n",
+                   ONBOARD_SENSOR_ID[0], ONBOARD_SENSOR_ID[1],
+                   ONBOARD_SENSOR_ID[2], ONBOARD_SENSOR_ID[3],
+                   ONBOARD_SENSOR_ID[4], ONBOARD_SENSOR_ID[5],
+                   ONBOARD_SENSOR_ID[6], ONBOARD_SENSOR_ID[7]);
+      DEBUG.println("-------------------------------");
 
-    ls &= confFile.getValue("IRDA", "Address", inivaluebuffer, 128);
-    IRDA_ADDR = (inival = inivaluebuffer).toInt();
-    ls &= confFile.getValue("IRDA", "Baudrate", inivaluebuffer, 128);
-    IRDA_BAUD = (inival = inivaluebuffer).toInt();
-    ls &= confFile.getValue("IRDA", "AllowControl", inivaluebuffer, 128);
-    IRDA_ALLOWCTRL = inivaluebuffer[0] == '1';
-
-    ls &= confFile.getValue("ESPNOW", "NetKey", inivaluebuffer, 128);
-    ESPNOW_KEY = inivaluebuffer;
-    ls &= confFile.getValue("ESPNOW", "AllowControl", inivaluebuffer, 128);
-    ESPNOW_ALLOWCTRL = inivaluebuffer[0] == '1';
-
-    ls &= confFile.getValue("Sample", "StartTrigger", inivaluebuffer, 128);
-    START_TRIGGER = (inival = inivaluebuffer).toInt();
-    ls &= confFile.getValue("Sample", "StopTrigger", inivaluebuffer, 128);
-    STOP_TRIGGER = (inival = inivaluebuffer).toInt();
-    ls &= confFile.getValue("Sample", "Interval", inivaluebuffer, 128);
-    SAMPLE_INTERVAL = (inival = inivaluebuffer).toInt();
-
-    ls &= confFile.getValue("Sensor", "BoardCriticalTemp", inivaluebuffer, 128);
-    CRITICAL_TEMP = (inival = inivaluebuffer).toInt();
-    ls &= confFile.getValue("Sensor", "BoardMaxTemp", inivaluebuffer, 128);
-    MAX_TEMP = (inival = inivaluebuffer).toInt();
-    if (confFile.getValue("Sensor", "OnboardSensorId", inivaluebuffer, 128))
-    {
-      hexStringToByteArray(inivaluebuffer, ONBOARD_SENSOR_ID, sizeof(ONBOARD_SENSOR_ID));
-    }
-    else
-    {
-      memset(ONBOARD_SENSOR_ID, 0, sizeof(ONBOARD_SENSOR_ID));
-    }
-
-    confFile.close();
-    DEBUG.println("---- Current Configuration ----");
-    DEBUG.printf("FSD_ADDR=%02X\n", FSD_ADDR);
-    DEBUG.printf("FSD_BAUD=%d\n", FSD_BAUD);
-    DEBUG.printf("FSD_POLL=%d\n", FSD_POLLINGINTERVAL);
-    DEBUG.printf("IRDA_ADDR=%02X\n", IRDA_ADDR);
-    DEBUG.printf("IRDA_BAUD=%d\n", IRDA_BAUD);
-    DEBUG.printf("IRDA_CTRL=%c\n", IRDA_ALLOWCTRL ? 'Y' : 'N');
-    DEBUG.printf("ESPN_KEY=%s\n", ESPNOW_KEY.c_str());
-    DEBUG.printf("ESPN_CTRL=%c\n", ESPNOW_ALLOWCTRL ? 'Y' : 'N');
-    DEBUG.printf("START_TRIGGER=%d\n", START_TRIGGER);
-    DEBUG.printf("STOP_TRIGGER=%d\n", STOP_TRIGGER);
-    DEBUG.printf("SAMPLE_INTERVAL=%d\n", SAMPLE_INTERVAL);
-    DEBUG.printf("CRITICAL_TEMP=%d\n", CRITICAL_TEMP);
-    DEBUG.printf("MAX_TEMP=%d\n", MAX_TEMP);
-    DEBUG.printf("ONBOARD_SENSOR_ID=%02X%02X%02X%02X%02X%02X%02X%02X\n",
-                 ONBOARD_SENSOR_ID[0], ONBOARD_SENSOR_ID[1],
-                 ONBOARD_SENSOR_ID[2], ONBOARD_SENSOR_ID[3],
-                 ONBOARD_SENSOR_ID[4], ONBOARD_SENSOR_ID[5],
-                 ONBOARD_SENSOR_ID[6], ONBOARD_SENSOR_ID[7]);
-    DEBUG.println("-------------------------------");
-
-    if (!ls)
-    {
-      DEBUG.println("Failed parsing some of the config entrys.");
-      DEBUG.println("Check you have latest version of config template.");
-      LED_ERR_ON;
-      SETSTATE(LED_BLINK, SAP);
-      LED_REC_OFF;
-      while (1)
-        delay(1000);
+      if (!ls)
+      {
+        DEBUG.println("Failed parsing some of the config entrys.");
+        DEBUG.println("Check you have latest version of config template.");
+        LED_ERR_ON;
+        SETSTATE(LED_BLINK, SAP);
+        LED_REC_OFF;
+        while (1)
+          delay(1000);
+      }
     }
   }
-
   // Communication init
   {
     DEBUG.println("Init RS485 and IRDA...");
@@ -363,13 +453,46 @@ void setup()
     DEBUG.println("Checking working temperature...");
     OnboardTempSensor.SampleNow();
     float temperature = OnboardTempSensor.receiveTemperature();
-    DEBUG.printf("TEMP_OB_SENSOR=%f\n", temperature);
+    DEBUG.printf("TEMP_OB_SENSOR=%.2f\n", temperature);
     if (temperature < -25 || temperature > 80)
     {
       DEBUG.println("Warning: System designed to work only under -25°C ~ 80°C.");
       SETSTATE(LED_BLINK, ERR);
     }
   }
+
+  /*
+    // Wifi AP
+    {
+      DEBUG.println("Init WiFi AP...");
+      IPAddress local_IP(192, 168, 45, 1);
+      IPAddress gateway(192, 168, 45, 1);
+      IPAddress subnet(255, 255, 255, 0);
+      WiFiAP.softAPConfig(local_IP, gateway, subnet);
+      WiFiAP.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, WIFI_AP_CHANNEL, WIFI_HIDDEN, WIFI_MAX_CLIENTS);
+      DEBUG.print("Created AP \"");
+      DEBUG.print(WIFI_AP_SSID);
+      DEBUG.print("\" with password \"");
+      DEBUG.print(WIFI_AP_PASSWORD);
+      DEBUG.print("\" @ch");
+      DEBUG.print(WIFI_AP_CHANNEL);
+      DEBUG.print(".\n");
+    }
+
+    // Web
+    {
+      webServer.on("/", HandleRootWeb);
+      webServer.on("/api/status", GetStatus);
+      webServer.on("/api/files", ListFiles);
+      webServer.on("/api/settime", SetTime);
+      webServer.on(UriBraces("/api/download/{}"), DownloadFile);
+    }
+
+    // DNS
+    {
+      dnsServer.start(53, "*", WiFiAP.softAPIP());
+    }
+  */
   xTaskCreate(
       Sample,        /* 任务函数 */
       "Sample",      /* 任务名 */
@@ -391,6 +514,9 @@ void setup()
 
 void loop()
 {
+  // webServer.handleClient();
+  yield();
+  // dnsServer.processNextRequest();
   yield();
 }
 
@@ -427,13 +553,13 @@ void LEDControl(void *param)
     }
     if (direction)
     {
-      bState += 8;
+      bState += 4;
     }
     else
     {
-      bState -= 8;
+      bState -= 4;
     }
-    delay(100);
+    delay(50);
   }
 }
 
@@ -468,7 +594,7 @@ void Sample(void *param)
         }
         else
         {
-          recordfile.printf("%u,%04hX,%04hX,%f,%f,%d,%d,%f,%f,%f,%f,%f,%d,%d,%d,%d,%04hX",
+          recordfile.printf("%u,%04hX,%04hX,%f,%f,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d,%04hX",
                             xLastWakeTime, latest_fsd_status.StateWord, latest_fsd_status.MalfunctionWord,
                             latest_fsd_status.TargetFrequency, latest_fsd_status.CurrentFrequency,
                             latest_fsd_status.RailVotage, latest_fsd_status.OutputVotage,
@@ -492,7 +618,7 @@ void Sample(void *param)
         }
         if (temp < -25 || temp > 80)
         {
-          DEBUG.printf("Warning: TEMP_OB_SENSOR=%f overrange! (-25°C ~ 80°C)\n", temp);
+          DEBUG.printf("Warning: TEMP_OB_SENSOR=%.2f overrange! (-25°C ~ 80°C)\n", temp);
           SETSTATE(LED_BLINK, ERR);
         }
       }
@@ -530,10 +656,15 @@ void RecStart()
     DEBUG.println("Already recording. CMD ignore.");
     return;
   }
-  char filepath[24];
+  char filepath[64];
+  RtcDateTime now = Rtc.GetDateTime();
   for (int i = 0; i < 2147483647; i++)
   {
+#ifdef ENABLE_RTC
+    sprintf(filepath, "/records/%d_%4d-%2d-%2d-%2d.%2d.%2d.csv", i, now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second());
+#else
     sprintf(filepath, "/records/%d.csv", i);
+#endif
     if (!SD.exists(filepath))
       break;
   }
@@ -689,4 +820,136 @@ void RS485RXNOW()
 void IOHangup()
 {
   delay(10);
+}
+
+void HandleRootWeb()
+{
+  auto f = SPIFFS.open("/index.html");
+  webServer.streamFile(f, "text/html", 200);
+  f.close();
+}
+
+void GetStatus()
+{
+  String statusjson;
+  statusjson += '{';
+  statusjson += "\"Freq\":";
+  statusjson += latest_fsd_status.CurrentFrequency;
+  statusjson += ',';
+  statusjson += "\"RVolt\":";
+  statusjson += latest_fsd_status.RailVotage;
+  statusjson += ',';
+  statusjson += "\"OVolt\":";
+  statusjson += latest_fsd_status.OutputVotage;
+  statusjson += ',';
+  statusjson += "\"OCurr\":";
+  statusjson += latest_fsd_status.OutputCurrent;
+  statusjson += ',';
+  statusjson += "\"OPwr\":";
+  statusjson += latest_fsd_status.OutputPower;
+  statusjson += ',';
+  statusjson += "\"OTorq\":";
+  statusjson += latest_fsd_status.OutputTorque;
+  statusjson += ',';
+  statusjson += "\"IGBTTemp\":";
+  statusjson += latest_fsd_status.SystemTemperature;
+  statusjson += ',';
+  statusjson += "\"RPM\":";
+  statusjson += latest_fsd_status.MotorRPM;
+  statusjson += ',';
+  statusjson += "\"AI1\":";
+  statusjson += latest_fsd_status.AI1Val;
+  statusjson += ',';
+  statusjson += "\"AI2\":";
+  statusjson += latest_fsd_status.AI2Val;
+  statusjson += ',';
+  statusjson += "\"PulseIn\":";
+  statusjson += latest_fsd_status.PulseInFreq;
+  statusjson += ',';
+  statusjson += "\"DigitalIn\":";
+  statusjson += latest_fsd_status.DigitalInState;
+  statusjson += ',';
+  statusjson += "\"StaWord\":";
+  statusjson += latest_fsd_status.StateWord;
+  statusjson += ',';
+  statusjson += "\"ErrWord\":";
+  statusjson += latest_fsd_status.MalfunctionWord;
+  statusjson += '}';
+  webServer.send(200, "application/json", statusjson);
+}
+
+void ListFiles()
+{
+  File root = SD.open("/records");
+  File file = root.openNextFile();
+  while (file)
+  {
+    webServer.sendContent(String(file.name()) + "<br>");
+    file = root.openNextFile();
+  }
+}
+
+void DownloadFile()
+{
+  String filename = webServer.pathArg(0);
+  File file = SD.open("/records/" + filename);
+  if (!file)
+  {
+    webServer.send(404, "text/plain", "404 File not found");
+    return;
+  }
+  webServer.streamFile(file, "application/octet-stream");
+  file.close();
+}
+
+void SetTime()
+{
+  String timestamp = webServer.arg("timestamp");
+  RtcDateTime time;
+  time = Rtc.GetDateTime();
+  DEBUG.println("Client requested a time sync.");
+  DEBUG.print("Local time:");
+  DEBUG.print(time.Year());
+  DEBUG.print('/');
+  DEBUG.print(time.Month());
+  DEBUG.print('/');
+  DEBUG.print(time.Day());
+  DEBUG.print(' ');
+  DEBUG.print(time.Hour());
+  DEBUG.print(':');
+  DEBUG.print(time.Minute());
+  DEBUG.print(':');
+  DEBUG.println(time.Second());
+
+  time.InitWithUnix32Time(timestamp.toInt());
+
+  DEBUG.print("Client time:");
+  DEBUG.print(time.Year());
+  DEBUG.print('/');
+  DEBUG.print(time.Month());
+  DEBUG.print('/');
+  DEBUG.print(time.Day());
+  DEBUG.print(' ');
+  DEBUG.print(time.Hour());
+  DEBUG.print(':');
+  DEBUG.print(time.Minute());
+  DEBUG.print(':');
+  DEBUG.println(time.Second());
+
+  DEBUG.println("Updating RTC...");
+  Rtc.SetDateTime(time);
+
+  time = Rtc.GetDateTime();
+  DEBUG.println("Readback:");
+  DEBUG.print(time.Year());
+  DEBUG.print('/');
+  DEBUG.print(time.Month());
+  DEBUG.print('/');
+  DEBUG.print(time.Day());
+  DEBUG.print(' ');
+  DEBUG.print(time.Hour());
+  DEBUG.print(':');
+  DEBUG.print(time.Minute());
+  DEBUG.print(':');
+  DEBUG.println(time.Second());
 }
