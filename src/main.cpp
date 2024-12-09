@@ -164,10 +164,10 @@ void setup()
   Rtc.Begin();
   uint8_t rtcmem[55];
   Rtc.GetMemory(0, rtcmem, 55);
-  if (!Rtc.IsDateTimeValid() || strcmp((FirmwareCompiletimeHash), (char *)rtcmem) != 0)
+  RtcDateTime compile = RtcDateTime(__DATE__, __TIME__);
+  if ((!Rtc.IsDateTimeValid()) || strcmp((FirmwareCompiletimeHash), (char *)rtcmem) != 0 || Rtc.GetDateTime() < compile)
   {
     DEBUG.println("! RTC datetime invalid, setting to compile time...");
-    RtcDateTime compile = RtcDateTime(__DATE__, __TIME__);
     Rtc.SetDateTime(compile);
     Rtc.SetMemory(0, (uint8_t *)FirmwareCompiletimeHash, strlen(FirmwareCompiletimeHash) + 1);
     Rtc.SetIsRunning(true);
@@ -523,11 +523,11 @@ void loop()
 inline void _applyLEDState(uint8_t pin, uint8_t state, uint8_t bstate)
 {
   if (state == LED_ON)
-    digitalWrite(pin, LOW);
+    analogWrite(pin, 203);
   else if (state == LED_OFF)
-    digitalWrite(pin, HIGH);
+    analogWrite(pin, 255);
   else if (state == LED_BLINK)
-    digitalWrite(pin, (bstate > 456 / 2) ? HIGH : LOW);
+    analogWrite(pin, (bstate > 456 / 2) ? 255 : 203);
   else if (state == LED_CYCLE)
     analogWrite(pin, bstate);
 }
