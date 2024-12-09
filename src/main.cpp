@@ -661,7 +661,7 @@ void RecStart()
   for (int i = 0; i < 2147483647; i++)
   {
 #ifdef ENABLE_RTC
-    sprintf(filepath, "/records/%d_%4d-%2d-%2d-%2d.%2d.%2d.csv", i, now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second());
+    sprintf(filepath, "/records/%04d-%02d-%02d-%02d.%02d.%02d_%d.csv", now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second(), i);
 #else
     sprintf(filepath, "/records/%d.csv", i);
 #endif
