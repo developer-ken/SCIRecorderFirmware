@@ -143,8 +143,8 @@ void setup()
   LED_SAP_ON;
   LED_REC_ON;
 
-  DEBUG.begin(115200);
-
+  DEBUG.begin(921600);
+ 
   DEBUG.println("SCIDrive Recorder by Developer_ken");
   DEBUG.print("Build ");
   DEBUG.print(__DATE__);
@@ -398,7 +398,7 @@ void setup()
       if (bytesEquals(address, ONBOARD_SENSOR_ID, sizeof(ONBOARD_SENSOR_ID)))
       {
         OnboardTempSensor.BindAddr(address);
-        TempSensors[SensorCount].Valid = true;
+        OnboardTempSensor.Valid = true;
         DEBUG.println(" - Matched onboard sensor.");
         continue;
       }
@@ -417,7 +417,7 @@ void setup()
         set_obsid = false;
         DEBUG.println("! ONBOARD_SENSOR_ID set.");
         OnboardTempSensor.BindAddr(address);
-        TempSensors[SensorCount].Valid = true;
+        OnboardTempSensor.Valid = true;
         DEBUG.println(" - Set as onboard sensor.");
         continue;
       }
@@ -436,7 +436,7 @@ void setup()
       SensorCount++;
     }
     DEBUG.printf("Scan complete. %d sensors found.\n", SensorCount);
-    if (TempSensors[SensorCount].Valid == false)
+    if (OnboardTempSensor.Valid == false)
     {
       DEBUG.println("Error: Onboard sensor not found on bus.");
       LED_ERR_ON;
