@@ -26,8 +26,8 @@ float M1820::receiveTemperature()
     unsigned short rawTemperature = (data[1] << 8) | data[0];
 
     // Convert raw temperature value to Celsius
-    float temperature = (((short)rawTemperature) / 256.0 + 40.0);
-    return temperature;
+    LastTemperature = (((short)rawTemperature) / 256.0 + 40.0);
+    return LastTemperature;
 }
 
 void M1820::SampleNow(){

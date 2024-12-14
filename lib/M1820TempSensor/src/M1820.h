@@ -14,6 +14,7 @@ public:
     void BindAddr(byte[8]);
     float receiveTemperature();
     byte Address[8];
+    float LastTemperature = 0;
 
 private:
     uint8_t _pin;

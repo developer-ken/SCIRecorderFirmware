@@ -13,6 +13,9 @@
 #include <uri/UriRegex.h>
 #include <uri/UriBraces.h>
 
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+
 #include <SD.h>
 #include <FS.h>
 
@@ -84,6 +87,7 @@ TickType_t PollTime = 0;
 TaskHandle_t TASK_LEDControl = NULL, TASK_Sample = NULL, TASK_Poll = NULL;
 FSDState latest_fsd_status;
 bool sampling = false;
+float temp; // latest ob_sensor temperature
 uint32_t modbus_sent = 0, modbus_error = 0;
 WiFiAPClass WiFiAP;
 ModbusMaster modbus;
@@ -108,6 +112,8 @@ void IOHangup();
 void LoadConfig();
 bool isAllZero(byte *bytes, int len);
 void hexStringToByteArray(const char *hexString, unsigned char *byteArray, size_t byteArraySize);
+String bytesToHexString(const byte *bytes, const int length);
+String ContentType(String filename);
 bool bytesEquals(byte *bytes1, byte *bytes2, int len);
 
 void HandleRootWeb();
@@ -115,6 +121,8 @@ void GetStatus();
 void ListFiles();
 void SetTime();
 void DownloadFile();
+void RedirectHome();
+void AssetFile();
 
 void setup()
 {
@@ -125,6 +133,8 @@ void setup()
   pinMode(DEBUG_SWITCH, INPUT_PULLUP);
   pinMode(RS485_TNOW, OUTPUT);
   digitalWrite(RS485_TNOW, LOW); // 保证释放485总线
+
+  // WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
   analogWriteFrequency(10000);
 
@@ -144,7 +154,7 @@ void setup()
   LED_REC_ON;
 
   DEBUG.begin(921600);
- 
+
   DEBUG.println("SCIDrive Recorder by Developer_ken");
   DEBUG.print("Build ");
   DEBUG.print(__DATE__);
@@ -176,6 +186,19 @@ void setup()
 
   DEBUG.printf("RTC datetime: %4d-%02d-%02d %02d:%02d:%02d\n", now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second());
 #endif
+
+  // SPIFFS
+  {
+    if (!SPIFFS.begin(true))
+    {
+      DEBUG.println("FAILED. SPIFFS partition not correctly programmed.");
+      LED_ERR_ON;
+      SETSTATE(LED_BLINK, SAP);
+      LED_REC_OFF;
+      while (1)
+        delay(1000);
+    }
+  }
 
   // Mount SD card
   {
@@ -226,7 +249,7 @@ void setup()
       {
         DEBUG.println("/config.ini does not exists.");
         DEBUG.println("- extracting default from SPIFFS...");
-        if (!SPIFFS.begin(true) || !SPIFFS.exists("/config.ini"))
+        if (!SPIFFS.exists("/config.ini"))
         {
           DEBUG.println("FAILED. SPIFFS partition not correctly programmed.");
           LED_ERR_ON;
@@ -461,38 +484,40 @@ void setup()
     }
   }
 
-  /*
-    // Wifi AP
-    {
-      DEBUG.println("Init WiFi AP...");
-      IPAddress local_IP(192, 168, 45, 1);
-      IPAddress gateway(192, 168, 45, 1);
-      IPAddress subnet(255, 255, 255, 0);
-      WiFiAP.softAPConfig(local_IP, gateway, subnet);
-      WiFiAP.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, WIFI_AP_CHANNEL, WIFI_HIDDEN, WIFI_MAX_CLIENTS);
-      DEBUG.print("Created AP \"");
-      DEBUG.print(WIFI_AP_SSID);
-      DEBUG.print("\" with password \"");
-      DEBUG.print(WIFI_AP_PASSWORD);
-      DEBUG.print("\" @ch");
-      DEBUG.print(WIFI_AP_CHANNEL);
-      DEBUG.print(".\n");
-    }
+  // Wifi AP
+  {
+    DEBUG.println("Init WiFi AP...");
+    IPAddress local_IP(192, 168, 45, 1);
+    IPAddress gateway(192, 168, 45, 1);
+    IPAddress subnet(255, 255, 255, 0);
+    WiFiAP.softAPConfig(local_IP, gateway, subnet);
+    WiFiAP.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, WIFI_AP_CHANNEL, WIFI_HIDDEN, WIFI_MAX_CLIENTS);
+    DEBUG.print("Created AP \"");
+    DEBUG.print(WIFI_AP_SSID);
+    DEBUG.print("\" with password \"");
+    DEBUG.print(WIFI_AP_PASSWORD);
+    DEBUG.print("\" @ch");
+    DEBUG.print(WIFI_AP_CHANNEL);
+    DEBUG.print(".\n");
+  }
 
-    // Web
-    {
-      webServer.on("/", HandleRootWeb);
-      webServer.on("/api/status", GetStatus);
-      webServer.on("/api/files", ListFiles);
-      webServer.on("/api/settime", SetTime);
-      webServer.on(UriBraces("/api/download/{}"), DownloadFile);
-    }
+  // Web
+  {
+    webServer.begin();
+    webServer.on("/", HandleRootWeb);
+    webServer.on("/api/status", GetStatus);
+    webServer.on("/api/files", ListFiles);
+    webServer.on("/api/settime", SetTime);
+    webServer.on(UriBraces("/api/assets/{}"), AssetFile);
+    webServer.on(UriBraces("/api/download/{}"), DownloadFile);
+    webServer.onNotFound(RedirectHome);
+  }
 
-    // DNS
-    {
-      dnsServer.start(53, "*", WiFiAP.softAPIP());
-    }
-  */
+  // DNS
+  {
+    dnsServer.start(53, "*", WiFiAP.softAPIP());
+  }
+
   xTaskCreate(
       Sample,        /* 任务函数 */
       "Sample",      /* 任务名 */
@@ -514,10 +539,10 @@ void setup()
 
 void loop()
 {
-  // webServer.handleClient();
-  yield();
-  // dnsServer.processNextRequest();
-  yield();
+  webServer.handleClient();
+  delay(1);
+  dnsServer.processNextRequest();
+  delay(1);
 }
 
 inline void _applyLEDState(uint8_t pin, uint8_t state, uint8_t bstate)
@@ -571,6 +596,14 @@ void Sample(void *param)
   while (true)
   {
     vTaskDelayUntil(&xLastWakeTime, taskPeriod);
+
+    M1820::SampleNow();
+    temp = OnboardTempSensor.receiveTemperature();
+    for (int i = 0; i < SensorCount; i++)
+    {
+      TempSensors[i].receiveTemperature();
+    }
+
     if (!sampling)
     {
       continue;
@@ -585,7 +618,6 @@ void Sample(void *param)
         LED_ERR_ON;
         poll_warn = true;
       }
-      M1820::SampleNow();
       {
         // 写变频器参数
         if (poll_warn)
@@ -609,12 +641,10 @@ void Sample(void *param)
       }
       {
         // 写温度传感器参数
-        float temp = OnboardTempSensor.receiveTemperature();
         recordfile.printf(",%f", temp);
         for (int i = 0; i < SensorCount; i++)
         {
-          temp = TempSensors[i].receiveTemperature();
-          recordfile.printf(",%f", temp);
+          recordfile.printf(",%f", TempSensors[i].LastTemperature);
         }
         if (temp < -25 || temp > 80)
         {
@@ -789,6 +819,14 @@ void hexStringToByteArray(const char *hexString, unsigned char *byteArray, size_
   }
 }
 
+void ByteArrayToHexString(const unsigned char *byteArray, size_t byteArraySize, char *hexString)
+{
+  for (size_t i = 0; i < byteArraySize; i++)
+  {
+    sprintf(hexString + 2 * i, "%02X", byteArray[i]); // 每次写入两个字符
+  }
+}
+
 bool bytesEquals(byte *bytes1, byte *bytes2, int len)
 {
   for (int i = 0; i < len; i++)
@@ -829,10 +867,19 @@ void HandleRootWeb()
   f.close();
 }
 
+void RedirectHome()
+{
+  webServer.sendHeader("Location", "http://" + WiFiAP.softAPIP().toString());
+  webServer.send(302, "text/plain", "302 Redirect to lading page");
+}
+
 void GetStatus()
 {
   String statusjson;
   statusjson += '{';
+  statusjson += "\"LTime\":";
+  statusjson += xTaskGetTickCount();
+  statusjson += ',';
   statusjson += "\"Freq\":";
   statusjson += latest_fsd_status.CurrentFrequency;
   statusjson += ',';
@@ -872,9 +919,25 @@ void GetStatus()
   statusjson += "\"StaWord\":";
   statusjson += latest_fsd_status.StateWord;
   statusjson += ',';
+  statusjson += "\"ObTemp\":";
+  statusjson += temp;
+  statusjson += ',';
   statusjson += "\"ErrWord\":";
   statusjson += latest_fsd_status.MalfunctionWord;
-  statusjson += '}';
+  statusjson += ',';
+  statusjson += "\"ExtSensors\":{";
+  for (int i = 0; i < 8; i++)
+  {
+    if (!TempSensors[i].Valid)
+      break;
+    char temp[17];
+    ByteArrayToHexString(TempSensors[i].Address, 8, temp);
+    if (i > 0)
+      statusjson += ",";
+    statusjson += "\"" + String(temp) + "\":";
+    statusjson += TempSensors[i].LastTemperature;
+  }
+  statusjson += "}}";
   webServer.send(200, "application/json", statusjson);
 }
 
@@ -882,11 +945,22 @@ void ListFiles()
 {
   File root = SD.open("/records");
   File file = root.openNextFile();
+  webServer.sendContent("{\"files\":[");
+  bool fst = true;
   while (file)
   {
-    webServer.sendContent(String(file.name()) + "<br>");
+    if (fst)
+    {
+      fst = false;
+    }
+    else
+    {
+      webServer.sendContent(",");
+    }
+    webServer.sendContent("\"" + String(file.name()) + "\"");
     file = root.openNextFile();
   }
+  webServer.sendContent("]}");
 }
 
 void DownloadFile()
@@ -899,6 +973,19 @@ void DownloadFile()
     return;
   }
   webServer.streamFile(file, "application/octet-stream");
+  file.close();
+}
+
+void AssetFile()
+{
+  String filename = webServer.pathArg(0);
+  File file = SPIFFS.open("/" + filename);
+  if (!file)
+  {
+    webServer.send(404, "text/plain", "404 File not found");
+    return;
+  }
+  webServer.streamFile(file, ContentType(filename));
   file.close();
 }
 
@@ -921,7 +1008,7 @@ void SetTime()
   DEBUG.print(':');
   DEBUG.println(time.Second());
 
-  time.InitWithUnix32Time(timestamp.toInt());
+  time.InitWithUnix32Time(timestamp.toInt() + 8 * 60 * 60); // 本地使用UTC+8时区
 
   DEBUG.print("Client time:");
   DEBUG.print(time.Year());
@@ -952,4 +1039,35 @@ void SetTime()
   DEBUG.print(time.Minute());
   DEBUG.print(':');
   DEBUG.println(time.Second());
+  webServer.sendContent("{\"status\":\"ok\"}");
+}
+
+String ContentType(String filename)
+{
+  String extention = filename.substring(filename.lastIndexOf('.') + 1);
+  extention.toLowerCase();
+  if (extention == "html")
+  {
+    return "text/html";
+  }
+  else if (extention == "css")
+  {
+    return "text/css";
+  }
+  else if (extention == "js")
+  {
+    return "application/javascript";
+  }
+  else if (extention == "json")
+  {
+    return "application/json";
+  }
+  else if (extention == "png")
+  {
+    return "image/png";
+  }
+  else if (extention == "jpg")
+  {
+    return "image/jpeg";
+  }
 }

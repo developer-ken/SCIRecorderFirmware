@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KD510-UO 遥测扩展卡</title>
+    <style>
+        .card {
+            box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2);
+            transition: 0.3s;
+            border-radius: 5px;
+            margin: 10px;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+
+        .card-ind {
+            box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2);
+            transition: 0.3s;
+            border-radius: 5px;
+            margin: 10px;
+            background-color: #f9f9f9;
+            display: flex;
+        }
+
+        .item-card {
+            margin: 20px;
+        }
+
+        .user-info {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .user-info img {
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+
+        .text {
+            margin-right: 10px;
+        }
+
+        .user-info .user-details {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .vip {
+            color: gold;
+            font-weight: bold;
+            margin-right: 5px;
+        }
+
+        .lvlow {
+            color: red;
+            font-weight: bold;
+            margin-right: 5px;
+        }
+
+        .lvhigh {
+            color: green;
+            font-weight: bold;
+            margin-right: 5px;
+        }
+
+        .item-details {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .status-indicator {
+            position: relative;
+            display: inline-block;
+        }
+
+        .status-indicator.red-circle {
+            width: 10px;
+            height: 10px;
+            background-color: red;
+            border-radius: 50%;
+            position: absolute;
+            right: 15px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <div class="user-info">
+            <div class="user-details">
+                <span>KD510遥测扩展卡 - by 邓君卓#6353</span>
+                <span>此扩展卡用于测试，仍处于开发阶段。</span>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <span>状态概述</span>
+        <div class="user-info">
+            <div class="user-details">
+                <span>在线时长：<a id="onlineDur"></a></span>
+                <span>母线电压：<a id="railVolt"></a>V</span>
+                <span>输出频率：<a id="outFreq"></a>Hz</span>
+                <span>输出电流：<a id="outCurrent"></a>A</span>
+                <span>模块温度：<a id="sysTemp"></a>℃</span>
+                <span>环境温度：<a id="brdTemp"></a>℃</span>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <span>额外温度测点</span>
+        <div class="extra_container">
+            <div class="user-details">
+                <span>测温点信息拉取中...</span>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <span>记录文件下载</span>
+        <div class="files_container">
+            <div class="user-details">
+                <span>文件列表拉取中...</span>
+            </div>
+        </div>
+    </div>
+    <script>
+        fetch('./api/files')
+            .then(response => response.json())
+            .then(data => {
+                document.querySelector('.files_container').innerHTML = '';
+                // 处理返回的JSON数据
+                const records = data.files;
+                if (records.length == 0) {
+                    document.querySelector('.files_container').innerHTML = '<div class="user-details">暂无记录</div>';
+                }
+                records.forEach(record => {
+                    const cardHTML = `
+                         <div class="card-ind" onclick="redirectToUrl('/api/download/${record}')">
+                             <div class="item-card">
+                                 <div class="item-details">
+                                     <span>${record}</span>
+                                 </div>
+                             </div>
+                         </div>
+                     `;
+
+                    // 将card添加到container中
+                    document.querySelector('.files_container').insertAdjacentHTML('beforeend', cardHTML);
+                });
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+
+        function syncTime() {
+            now = new Date();
+            fetch("./api/settime?timestamp=" + ((now.getTime()) / 1000).toFixed(0));
+        }
+
+        function hifreq_update() {
+            fetch('./api/status')
+                .then(response => response.json())
+                .then(data => {
+                    tsec = Math.floor(data.LTime / 1000);
+                    document.getElementById('onlineDur').innerText = Math.floor(tsec / 3600).toString().padStart(2, '0')
+                        + ":" + (Math.floor(tsec / 60) % 60).toString().padStart(2, '0')
+                        + ":" + (tsec % 60).toString().padStart(2, '0');
+                    document.getElementById('railVolt').innerText = data.RVolt;
+                    document.getElementById('outFreq').innerText = data.Freq;
+                    document.getElementById('outCurrent').innerText = data.OCurr;
+                    document.getElementById('sysTemp').innerText = data.IGBTTemp;
+                    document.getElementById('brdTemp').innerText = data.ObTemp;
+                    document.querySelector('.extra_container').innerHTML = '';
+                    hit = 0;
+                    for (var sensor in data.ExtSensors) {
+                        document.querySelector('.extra_container').innerHTML +=
+                            "<span>" + sensor + ":" + data.ExtSensors[sensor] + "℃</span>";
+                        hit++;
+                    }
+                    if (hit == 0) {
+                        document.querySelector('.extra_container').innerHTML = '<div class="user-details">没有连接外置传感器</div>';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching status:', error);
+                });
+        }
+
+        function redirectToUrl(url) {
+            if (url != "undefined") {
+                window.location.href = url;
+            }
+        }
+
+        syncTime();
+        window.setInterval(hifreq_update, 1000);
+    </script>
+</body>
+
+</html>
