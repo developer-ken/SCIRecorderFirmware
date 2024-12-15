@@ -1,5 +1,4 @@
 #include <ModbusMaster.h>
-#include <soc/rtc_wdt.h>
 #include <Arduino.h>
 #include <IniFile.h>
 #include <SPIFFS.h>
@@ -14,6 +13,7 @@
 #include <uri/UriBraces.h>
 
 #include "soc/soc.h"
+#include "soc/rtc_wdt.h"
 #include "soc/rtc_cntl_reg.h"
 
 #include <SD.h>
@@ -97,7 +97,7 @@ File rawfile;
 bool DEBUG_MODE = false;      // Use debug mode, will override self-test result so can continue anyway.
 bool DEBUG_NO_SDCARD = false; // In debug move, no SD card found, worlaround so can continue anyway.
 
-char *FirmwareCompiletimeHash = __TIME__ " " __DATE__;
+const char *FirmwareCompiletimeHash = __TIME__ " " __DATE__;
 
 WebServer webServer(80);
 DNSServer dnsServer;
