@@ -7,6 +7,7 @@
 
 #include <WiFi.h>
 #include <WiFiAP.h>
+#include <ESPNowW.h>
 #include <DNSServer.h>
 #include <WebServer.h>
 #include <uri/UriRegex.h>
@@ -34,6 +35,7 @@ RtcDS1307<TwoWire> Rtc(Wire);
 #define IRDA Serial2
 
 #define SETSTATE(STATE, INDEX) (LED_STATE = (LED_STATE & ~(0b11 << INDEX)) | (STATE << INDEX))
+uint8_t BROADCAST_ADDR[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 #define LED_OFF 0b00
 #define LED_ON 0b01
@@ -84,7 +86,7 @@ OneWire oneWire;         // OneWire bus
 int SensorCount = 0;
 uint8_t LED_STATE = 0;
 TickType_t PollTime = 0;
-TaskHandle_t TASK_LEDControl = NULL, TASK_Sample = NULL, TASK_Poll = NULL;
+TaskHandle_t TASK_LEDControl = NULL, TASK_Sample = NULL, TASK_Poll = NULL, TASK_ESPNow = NULL;
 FSDState latest_fsd_status;
 bool sampling = false;
 float temp; // latest ob_sensor temperature
@@ -108,6 +110,7 @@ void RS485RXNOW();
 void LEDControl(void *);
 void Sample(void *);
 void Poll(void *);
+void FSDStateBroadcaster(void *);
 void IOHangup();
 void LoadConfig();
 bool isAllZero(byte *bytes, int len);
@@ -499,6 +502,9 @@ void setup()
     DEBUG.print("\" @ch");
     DEBUG.print(WIFI_AP_CHANNEL);
     DEBUG.print(".\n");
+
+    ESPNow.init();
+    ESPNow.add_peer(BROADCAST_ADDR);
   }
 
   // Web
@@ -532,6 +538,13 @@ void setup()
       NULL,        /* 参数，入参为空 */
       1,           /* 优先级 */
       &TASK_Poll); /* 任务句柄 */
+  xTaskCreate(
+      FSDStateBroadcaster,   /* 任务函数 */
+      "FSDStateBroadcaster", /* 任务名 */
+      2 * 1024,              /* 任务栈大小，根据需要自行设置*/
+      NULL,                  /* 参数，入参为空 */
+      1,                     /* 优先级 */
+      &TASK_ESPNow);         /* 任务句柄 */
   LED_ERR_OFF;
   LED_SAP_OFF;
   SETSTATE(LED_CYCLE, REC);
@@ -858,6 +871,12 @@ void RS485RXNOW()
 void IOHangup()
 {
   delay(10);
+}
+
+void FSDStateBroadcaster()
+{
+  ESPNow.send_message(BROADCAST_ADDR, (uint8_t *)&latest_fsd_status, sizeof(FSDState));
+  delay(100);
 }
 
 void HandleRootWeb()
