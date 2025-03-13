@@ -495,6 +495,7 @@ void setup()
     IPAddress subnet(255, 255, 255, 0);
     WiFiAP.softAPConfig(local_IP, gateway, subnet);
     WiFiAP.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, WIFI_AP_CHANNEL, WIFI_HIDDEN, WIFI_MAX_CLIENTS);
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
     DEBUG.print("Created AP \"");
     DEBUG.print(WIFI_AP_SSID);
     DEBUG.print("\" with password \"");
